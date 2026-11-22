@@ -44,8 +44,8 @@ jobs:
         run: cargo test
       - name: Package
         run: scripts/publish.sh --dry-run
+      # Built on every run, so a broken release build shows up before a tag.
       - name: Static binaries
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           for arch in x86_64 aarch64; do
             cargo build --release --target "$arch-unknown-linux-musl"
@@ -56,6 +56,15 @@ jobs:
           # The name releases up to 0.2.1 used for the x86_64 binary.
           cp netleash-x86_64 netleash
           sha256sum netleash > netleash.sha256
+      - name: Keep the binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: netleash-binaries
+          path: |
+            netleash-x86_64
+            netleash-x86_64.sha256
+            netleash-aarch64
+            netleash-aarch64.sha256
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
