@@ -1,0 +1,6 @@
+# D-Bus activation; installed in /usr/share/dbus-1/system-services/.
+[D-BUS Service]
+Name=io.github.sigmasd.Bandito.Helper
+Exec=/usr/libexec/bandito-helper --dbus
+User=root
+SystemdService=bandito-helper.service

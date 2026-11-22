@@ -103,6 +103,40 @@ Events, one per line on stdout:
 - A sample is sent once a second.
 - `kind` is `app`, `service` or `other`.
 
+## Installing as a system service
+
+```sh
+cargo build --release
+sudo scripts/install.sh
+```
+
+This installs the helper as `/usr/libexec/bandito-helper` with:
+
+- a D-Bus policy: only root may run the service, anyone may call it;
+- a D-Bus activation file and a systemd unit, so the service starts on demand;
+- a polkit action, `io.github.sigmasd.Bandito.Helper.configure`. The user at
+  the computer may change settings without a password, like network settings;
+  others must authenticate as an administrator.
+
+Bandito then uses it automatically, without `pkexec` and without a password
+prompt at every start. `DESTDIR` and `PREFIX` work as usual for packaging.
+
+How the pieces talk:
+
+- **Service:** `bandito-helper --dbus` owns `io.github.sigmasd.Bandito.Helper`
+  on the system bus, at `/io/github/sigmasd/Bandito/Helper`.
+- **Interface `io.github.sigmasd.Bandito.Helper1`:**
+  - method `Command(s json)` takes the protocol commands below; polkit checks
+    the caller first;
+  - signal `Sample(s json)` sends a `sample` event once a second;
+  - property `Version`.
+- **When clients leave:** if the last client that sent a command leaves the
+  bus, its limits are removed. After a minute with no clients the service
+  exits, and D-Bus starts it again when needed.
+- **Client:** `bandito-helper --client` runs as the user and bridges stdin and
+  stdout to the service. Bandito speaks the same JSON lines to it as to the
+  helper run through `pkexec`.
+
 ## Testing as root without sudo
 
 `scripts/vm.sh` boots your own kernel in a throwaway VM with
@@ -113,6 +147,15 @@ Events, one per line on stdout:
 - runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
 - checks attribution, per-app and global limits in both directions, error
   reporting, and that nothing stays attached after the helper exits.
+
+`scripts/vm-dbus-test.sh` runs in a second VM. It starts a private system bus
+with `dist/`'s policy and checks that:
+
+- only root can run the service, and commands are refused when polkit can't
+  answer;
+- the unprivileged `nobody` user can set limits through the client and
+  receive samples;
+- a client's limits go away when it leaves.
 
 It needs `/dev/kvm`, QEMU, `uv tool install virtme-ng`, and a static busybox.
 On Fedora you can extract one without installing it:
@@ -130,9 +173,9 @@ BANDITO_BACKEND=ebpf BANDITO_HELPER=target/release/bandito-helper deno run -A sr
 
 ## Not done yet
 
-- It runs through `pkexec` like the old helpers. The plan is to install it as
-  a system service on the system D-Bus, with polkit deciding who may change
-  limits.
+- The systemd unit and the real polkit daemon haven't been tested: the VM has
+  neither. The test bus loads the same D-Bus policy, and the service fails
+  closed when polkit doesn't answer.
 - Upload limiting drops packets. Pacing with EDT and the `fq` qdisc would be
   smoother.
 - Programs started from a terminal share the terminal's scope, so their traffic

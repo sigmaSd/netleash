@@ -1,0 +1,12 @@
+# Installed in /usr/lib/systemd/system/. Started on demand through D-Bus.
+[Unit]
+Description=Bandito per-app network measuring and limits
+
+[Service]
+Type=dbus
+BusName=io.github.sigmasd.Bandito.Helper
+ExecStart=/usr/libexec/bandito-helper --dbus
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

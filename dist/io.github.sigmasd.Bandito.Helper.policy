@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Installed in /usr/share/polkit-1/actions/. -->
+<policyconfig>
+  <vendor>Bandito</vendor>
+  <vendor_url>https://github.com/sigmaSd/bandito-gtk</vendor_url>
+  <action id="io.github.sigmasd.Bandito.Helper.configure">
+    <description>Measure and limit network traffic per app</description>
+    <message>Authentication is required to measure and limit network traffic per app</message>
+    <icon_name>io.github.sigmasd.bandito</icon_name>
+    <defaults>
+      <!-- Like network settings: the user at the computer may, others must authenticate. -->
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

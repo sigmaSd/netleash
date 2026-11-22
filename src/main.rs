@@ -7,6 +7,7 @@
 //! descriptors, not left behind in the kernel like tc rules.
 
 mod apps;
+mod dbus;
 mod dns;
 mod limits;
 mod protocol;
@@ -242,6 +243,15 @@ impl Helper {
         Ok(())
     }
 
+    /// Remove every limit, e.g. when the last client leaves.
+    fn clear_limits(&mut self) {
+        let apps: Vec<String> = self.slots.iter().map(|(app, _, _)| app.to_string()).collect();
+        for app in apps {
+            let _ = self.command(Command::Limit { app: Some(app), down: None, up: None });
+        }
+        let _ = self.command(Command::Limit { app: None, down: None, up: None });
+    }
+
     /// Apply a command; returns false when the helper should stop.
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
@@ -376,6 +386,7 @@ impl Helper {
     }
 }
 
+/// Run as a child of Bandito (through pkexec), on stdin/stdout.
 fn run() -> Result<()> {
     let (_bpf, maps) = load()?;
     let mut helper = Helper::new(maps)?;
@@ -392,7 +403,7 @@ fn run() -> Result<()> {
         let _ = commands.send(r#"{"cmd":"stop"}"#.into());
     });
 
-    emit(&Event::Ready { version: env!("CARGO_PKG_VERSION") });
+    emit(&Event::Ready { version: env!("CARGO_PKG_VERSION").into() });
     let mut next = Instant::now() + Duration::from_secs(1);
     loop {
         let wait = next.saturating_duration_since(Instant::now());
@@ -421,16 +432,31 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+const USAGE: &str = "\
+bandito-helper: measures and limits traffic per app with eBPF.
+
+  bandito-helper            run as root, speaking JSON lines on stdin/stdout
+  bandito-helper --dbus     run as the system D-Bus service (as root)
+  bandito-helper --client   bridge stdin/stdout to the service (as the user)
+
+--dbus --insecure-no-polkit skips authorization; only for tests.
+See README.md for the protocol.";
+
 fn main() {
-    if std::env::args().any(|a| a == "-h" || a == "--help") {
-        println!(
-            "bandito-helper {}: measures and limits traffic per app with eBPF.\n\
-             Run as root. Speaks JSON lines on stdin/stdout; see README.md.",
-            env!("CARGO_PKG_VERSION")
-        );
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("-h") || has("--help") {
+        println!("{USAGE}");
         return;
     }
-    if let Err(error) = run() {
+    let result = if has("--dbus") {
+        dbus::serve(!has("--insecure-no-polkit"))
+    } else if has("--client") {
+        dbus::client()
+    } else {
+        run()
+    };
+    if let Err(error) = result {
         emit(&Event::Error { message: format!("{error:#}") });
         std::process::exit(1);
     }

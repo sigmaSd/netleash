@@ -29,7 +29,7 @@ pub enum Command {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Event {
-    Ready { version: &'static str },
+    Ready { version: String },
     Sample(Sample),
     Error { message: String },
     Stopped,
