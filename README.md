@@ -199,6 +199,23 @@ dnf download busybox && rpm2cpio busybox-*.x86_64.rpm | cpio -idm ./usr/bin/busy
 BUSYBOX=$PWD/usr/bin/busybox scripts/vm.sh
 ```
 
+### On arm64
+
+`scripts/vm-arm64.sh` tests the static aarch64 binary on an aarch64 kernel,
+from any machine: QEMU emulates the CPU, so it needs no KVM, and it takes about
+half a minute. It checks that netleash attaches, attributes a download to an
+app, holds a download limit, and stops. On Fedora, get an aarch64 kernel and
+busybox without installing them:
+
+```sh
+mkdir arm64-root && cd arm64-root
+dnf download --forcearch=aarch64 kernel-core kernel-modules-core busybox
+for rpm in *.rpm; do rpm2cpio "$rpm" | cpio -idm --quiet; done
+cd .. && ARM64_ROOT=$PWD/arm64-root scripts/vm-arm64.sh
+```
+
+It also needs `qemu-system-aarch64`, or `QEMU` set to one.
+
 To try a build with Bandito, run Bandito with `NETLEASH=target/release/netleash`.
 
 To publish, `scripts/publish.sh` builds the eBPF object, which the crate ships
