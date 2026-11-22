@@ -7,8 +7,9 @@ limiting.
 
 ## How it works
 
-Two `cgroup_skb` eBPF programs (`bpf/bandito.bpf.c`) are attached to the root
-cgroup. Every packet a local socket sends or receives passes through them with
+Two `cgroup_skb` eBPF programs, written in Rust with
+[aya-ebpf](https://crates.io/crates/aya-ebpf) (`ebpf/`), are attached to the
+root cgroup. Every packet a local socket sends or receives passes through them with
 the socket's cgroup id. Desktops run each app in its own systemd scope
 (`app-gnome-org.mozilla.firefox-9848.scope`) and each service in its own unit,
 so the cgroup names the app.
@@ -34,16 +35,37 @@ Compared with the previous helpers:
 - Nothing is left behind: the programs are held by `bpf_link` file
   descriptors and detach when the helper exits, however it exits.
 
+## Layout
+
+- `ebpf/`: the eBPF programs (`no_std`, BPF target).
+- `common/`: the map keys and values both sides use, defined once.
+- `src/`: the userspace helper.
+
 ## Build
 
-Needs Rust 1.98 (pinned in `rust-toolchain.toml`) and clang.
+The helper builds with Rust 1.98 (pinned in `rust-toolchain.toml`). The eBPF
+programs need, once:
+
+```sh
+rustup toolchain install nightly-2026-11-21 --component rust-src
+cargo install bpf-linker
+```
+
+Then:
 
 ```sh
 cargo build --release
 ```
 
-`build.rs` compiles `bpf/bandito.bpf.c` and embeds the object in the binary.
-`cargo test` runs the userspace tests without root.
+- `build.rs` compiles `ebpf/` for `bpfel-unknown-none` with that nightly, for
+  BPF ISA v3 (Linux 5.12+, for atomic fetch-and-add and compare-and-swap),
+  and embeds the object in the binary.
+- The nightly is pinned because the programs use core's atomic intrinsics:
+  `core` has no 64-bit atomic types for the BPF target.
+- `cargo test` runs the userspace tests without root. It also checks the
+  compiled object: both programs and all maps are there, and every atomic add
+  returns the old value. A relaxed add compiles to BPF's plain add, which
+  returns nothing, so the atomics are sequentially consistent.
 
 ## Protocol
 

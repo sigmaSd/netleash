@@ -2,15 +2,12 @@
 
 use std::collections::HashMap;
 
-/// Bucket slots 0 and 1 hold the global download and upload limits.
-pub const GLOBAL_DOWN: u32 = 0;
-pub const GLOBAL_UP: u32 = 1;
-pub const MAX_BUCKETS: u32 = 1024;
+pub use bandito_helper_common::{GLOBAL_DOWN, GLOBAL_UP, MAX_BUCKETS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    Down = 0,
-    Up = 1,
+    Down = bandito_helper_common::DIR_DOWN as isize,
+    Up = bandito_helper_common::DIR_UP as isize,
 }
 
 /// The burst a rate allows: a quarter second of traffic, at least 32 KiB, so

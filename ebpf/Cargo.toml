@@ -1,0 +1,15 @@
+[package]
+name = "bandito-helper-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aya-ebpf = "0.3"
+bandito-helper-common = { path = "../common" }
+
+[build-dependencies]
+which = { version = "8", default-features = false, features = ["real-sys"] }
+
+[[bin]]
+name = "bandito"
+path = "src/main.rs"

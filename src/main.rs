@@ -1,6 +1,7 @@
 //! bandito-helper: measures and limits network traffic per app with eBPF.
 //!
-//! Runs as root, attaches two cgroup_skb programs to the root cgroup, and
+//! Runs as root, attaches the two cgroup_skb programs in `ebpf/` to the
+//! root cgroup, and
 //! talks JSON lines on stdin/stdout (see `protocol`). The programs detach
 //! when the helper exits, however it exits: they are held by bpf_link file
 //! descriptors, not left behind in the kernel like tc rules.
@@ -15,8 +16,9 @@ use apps::{Cgroup, Kind, CGROUP_ROOT};
 use aya::{
     maps::{Array, HashMap as BpfHashMap, MapData, PerCpuHashMap},
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
-    Ebpf, Pod,
+    Ebpf,
 };
+use bandito_helper_common::{AppCounters, Bucket, BucketKey, Config, FlowCounters, FlowKey};
 use limits::{Direction, Slots, GLOBAL_DOWN, GLOBAL_UP, MAX_RATE};
 use protocol::{Command, Connection, Event, Rates, Sample};
 use std::{
@@ -30,69 +32,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-static OBJECT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bandito.bpf.o"));
-
-// Mirrors of the structs in bpf/bandito.bpf.c.
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Config {
-    ifindex: u32,
-    enabled: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct AppCounters {
-    rx_bytes: u64,
-    tx_bytes: u64,
-    rx_packets: u64,
-    tx_packets: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-struct FlowKey {
-    cgroup: u64,
-    family: u8,
-    protocol: u8,
-    local_port: u16,
-    remote_port: u16,
-    pad: u16,
-    remote: [u8; 16],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct FlowCounters {
-    rx_bytes: u64,
-    tx_bytes: u64,
-    last_seen_ns: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct BucketKey {
-    cgroup: u64,
-    direction: u32,
-    pad: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Bucket {
-    tokens: i64,
-    last_ns: u64,
-    rate: u64,
-    burst: u64,
-}
-
-// SAFETY: plain #[repr(C)] integer structs without implicit padding.
-unsafe impl Pod for Config {}
-unsafe impl Pod for AppCounters {}
-unsafe impl Pod for FlowKey {}
-unsafe impl Pod for FlowCounters {}
-unsafe impl Pod for BucketKey {}
-unsafe impl Pod for Bucket {}
+static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/bandito"));
 
 struct Maps {
     config: Array<MapData, Config>,
@@ -177,7 +117,7 @@ fn ifindex(name: &str) -> Result<u32> {
 }
 
 fn remote_address(key: &FlowKey) -> IpAddr {
-    if key.family == 10 {
+    if key.family == bandito_helper_common::AF_INET6 {
         IpAddr::V6(Ipv6Addr::from(key.remote))
     } else {
         IpAddr::V4(Ipv4Addr::new(
@@ -509,14 +449,24 @@ mod tests {
         }
     }
 
+    /// A plain BPF atomic add (no fetch flag) never returns the old value,
+    /// so code relying on it would silently compute garbage; see `fetch_add`
+    /// in ebpf/src/main.rs.
     #[test]
-    fn struct_layouts_match_the_c_side() {
-        assert_eq!(std::mem::size_of::<Config>(), 8);
-        assert_eq!(std::mem::size_of::<AppCounters>(), 32);
-        assert_eq!(std::mem::size_of::<FlowKey>(), 32);
-        assert_eq!(std::mem::size_of::<FlowCounters>(), 24);
-        assert_eq!(std::mem::size_of::<BucketKey>(), 16);
-        assert_eq!(std::mem::size_of::<Bucket>(), 32);
+    fn every_atomic_add_fetches() {
+        const BPF_STX_ATOMIC_DW: u8 = 0xdb;
+        const BPF_FETCH: i32 = 0x01;
+        let object = aya_obj::Object::parse(OBJECT).unwrap();
+        let mut atomics = 0;
+        for function in object.functions.values() {
+            for insn in &function.instructions {
+                if insn.code == BPF_STX_ATOMIC_DW {
+                    atomics += 1;
+                    assert_ne!(insn.imm & BPF_FETCH, 0, "{} has a plain atomic add", function.name);
+                }
+            }
+        }
+        assert!(atomics > 0, "the token buckets use atomics");
     }
 
     #[test]

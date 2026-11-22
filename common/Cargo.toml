@@ -1,0 +1,12 @@
+[package]
+name = "bandito-helper-common"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+# Implement aya::Pod so userspace can use these types as map keys and values.
+user = ["dep:aya"]
+
+[dependencies]
+aya = { version = "0.16", optional = true }
