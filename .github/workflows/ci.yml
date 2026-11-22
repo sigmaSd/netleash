@@ -43,7 +43,7 @@ jobs:
       - name: Test
         run: cargo test
       - name: Package
-        run: scripts/publish.sh --dry-run --allow-dirty
+        run: scripts/publish.sh --dry-run
       - name: Static binary
         if: startsWith(github.ref, 'refs/tags/')
         run: |

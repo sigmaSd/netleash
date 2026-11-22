@@ -6,10 +6,15 @@
 #   scripts/publish.sh --dry-run  check the packages only
 set -eu
 cd "$(dirname "$0")/.."
+# Only the generated object may differ from git (cargo calls it dirty).
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Commit or stash your changes first." >&2
+  exit 1
+fi
 cargo build --release
 # The object build.rs just made (layouts differ between Cargo versions).
 out=$(find "${CARGO_TARGET_DIR:-target}/release/build" -name netleash.bpf.o \
   -newer build.rs -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)
 cp "$out" netleash.bpf.o
 # Both in one call, in dependency order.
-cargo publish -p netleash-common -p netleash "$@"
+cargo publish -p netleash-common -p netleash --allow-dirty "$@"
