@@ -4,16 +4,16 @@ See and limit network traffic per app on Linux, with eBPF.
 
 netleash counts every app's download and upload, and each of its connections,
 as the kernel sends and receives them. It caps any app, or all of them
-together, in either direction, over IPv4 and IPv6. It runs as a small system
-service that apps talk to over D-Bus. [Bandito](https://github.com/sigmaSd/bandito-gtk)
-is a GTK front end for it; anything that speaks its JSON protocol can be one.
+together, in either direction, over IPv4 and IPv6. Front ends run it and talk
+to it in JSON lines on stdin and stdout; [Bandito](https://github.com/sigmaSd/bandito-gtk)
+is a GTK one.
 
 - Apps are named by their application ID (`org.mozilla.firefox`), from the
   systemd scope desktops start them in, so front ends can show the right name
   and icon.
 - Upload limits are paced, not dropped: TCP doesn't retransmit.
-- Nothing is left behind: everything detaches when netleash exits, however it
-  exits.
+- It installs nothing and leaves nothing behind: everything detaches when
+  netleash exits, however it exits.
 
 It needs Linux 5.12 or later with cgroup v2, which any current distribution has.
 
@@ -23,41 +23,48 @@ From crates.io (the eBPF programs come precompiled, so stable Rust is enough):
 
 ```sh
 cargo install netleash
-sudo ~/.cargo/bin/netleash --install
 ```
 
-Or download `netleash` from the
-[latest release](https://github.com/sigmaSd/netleash/releases/latest), then run
-`chmod +x netleash` and `sudo ./netleash --install`.
+Or download the static `netleash` binary from the
+[latest release](https://github.com/sigmaSd/netleash/releases/latest) and
+`chmod +x` it.
 
-`--install` copies the binary to `/usr/bin/netleash` and adds:
+## Running it
 
-- a D-Bus policy: only root may run the service, anyone may call it;
-- a D-Bus activation file and a systemd unit, so the service starts on demand;
-- a polkit action, `io.github.sigmasd.Netleash.configure`. The user at the
-  computer may change limits without a password, like network settings;
-  others must authenticate as an administrator.
+netleash needs root, or three capabilities. Pick one way:
 
-`sudo netleash --uninstall` removes them again. Both take `--prefix DIR`
-(default `/usr`). Packagers can use `scripts/install.sh`, which honours
-`DESTDIR` and `PREFIX`.
+- **On demand, as root:** run it with `pkexec netleash` or `sudo netleash`. It
+  is root only while it runs, nothing is installed, and you're asked for your
+  password each time.
+- **With file capabilities, as yourself:** grant them to the binary once:
 
-## Use
+  ```sh
+  sudo setcap cap_bpf,cap_net_admin,cap_perfmon+ep "$(command -v netleash)"
+  ```
 
-As your user, `netleash --client` connects to the service, starting it if
-needed, and speaks the [protocol](#protocol) on stdin and stdout:
+  Then run `netleash` as your user, with no prompt and nothing installed: the
+  capabilities live in an extended attribute on the binary.
+  - `cap_bpf` loads the programs and maps.
+  - `cap_net_admin` attaches them and lets `tc` add `fq` for paced uploads.
+    netleash passes it on to `tc`.
+  - `cap_perfmon` lets the kernel verifier accept the pointer arithmetic it
+    otherwise reserves for root.
+
+  Changing the file drops the capabilities, so a replaced or reinstalled
+  binary has none until you run `setcap` again. `netleash --capable` says
+  whether this binary can run without root.
+
+Then speak the [protocol](#protocol):
 
 ```console
-$ netleash --client
-{"type":"ready","version":"0.1.0"}
+$ netleash
+{"type":"ready","version":"0.2.0"}
 {"cmd":"interface","name":"wlan0"}
 {"type":"sample","interface":"wlan0","total":{"rx":3200000,"tx":410000},"apps":[...],"connections":[...]}
 {"cmd":"limit","app":"org.mozilla.firefox","down":2500000,"up":null}
 ```
 
-When the client exits, the limits it set are removed.
-
-Bandito uses netleash automatically when the service is installed.
+Closing stdin stops it and removes every limit.
 
 ## How it works
 
@@ -124,8 +131,7 @@ cargo build --release
 
 ## Protocol
 
-Run as root (`sudo netleash`, as a front end does through `pkexec`), or through
-the service with `netleash --client`, netleash speaks JSON lines.
+netleash speaks JSON lines on stdin and stdout.
 
 Commands, one per line on stdin:
 
@@ -138,13 +144,12 @@ Commands, one per line on stdin:
 
 - `app` is an ID from the samples. `null` limits all apps together.
 - Rates are bytes per second. `null` removes that limit.
-- Closing stdin stops netleash (or, with `--client`, removes the client's
-  limits).
+- Closing stdin stops netleash.
 
 Events, one per line on stdout:
 
 ```json
-{"type": "ready", "version": "0.1.0"}
+{"type": "ready", "version": "0.2.0"}
 {"type": "sample", "interface": "wlan0", "total": {"rx": 3200000, "tx": 410000},
  "apps": [{"id": "org.mozilla.firefox", "kind": "app",
            "units": ["app-gnome-org.mozilla.firefox-9848.scope"],
@@ -160,23 +165,6 @@ Events, one per line on stdout:
 - A sample is sent once a second.
 - `kind` is `app`, `service` or `other`.
 
-## D-Bus service
-
-How the pieces talk:
-
-- **Service:** `netleash --dbus` owns `io.github.sigmasd.Netleash`
-  on the system bus, at `/io/github/sigmasd/Netleash`.
-- **Interface `io.github.sigmasd.Netleash1`:**
-  - method `Command(s json)` takes the protocol commands below; polkit checks
-    the caller first;
-  - signal `Sample(s json)` sends a `sample` event once a second;
-  - property `Version`.
-- **When clients leave:** if the last client that sent a command leaves the
-  bus, its limits are removed. After a minute with no clients the service
-  exits, and D-Bus starts it again when needed.
-- **Client:** `netleash --client` runs as the user and bridges stdin and
-  stdout to the service, so a front end speaks the same JSON lines either way.
-
 ## Testing as root without sudo
 
 `scripts/vm.sh` boots your own kernel in a throwaway VM with
@@ -189,15 +177,10 @@ How the pieces talk:
   pacing through `fq` without retransmissions, limits without `fq`, error
   reporting, and that nothing stays attached after netleash exits.
 
-`scripts/vm-dbus-test.sh` runs in a second VM. It starts a private system bus
-with `dist/`'s policy and checks that:
-
-- only root can run the service, and commands are refused when polkit can't
-  answer;
-- the unprivileged `nobody` user can set limits through the client and
-  receive samples;
-- a client's limits go away when it leaves;
-- `--install` and `--uninstall` write and remove the service files.
+`scripts/vm-caps-test.sh` runs in a second VM. It gives the binary its file
+capabilities and runs it as the unprivileged `nobody` user, checking that it
+starts, attributes traffic, and holds paced and dropped limits, with `tc`
+adding `fq` through the passed-on capability.
 
 It needs `/dev/kvm`, QEMU, `uv tool install virtme-ng`, and a static busybox.
 On Fedora you can extract one without installing it:
@@ -207,18 +190,13 @@ dnf download busybox && rpm2cpio busybox-*.x86_64.rpm | cpio -idm ./usr/bin/busy
 BUSYBOX=$PWD/usr/bin/busybox scripts/vm.sh
 ```
 
-To try a build with Bandito without installing it, run Bandito with
-`BANDITO_BACKEND=ebpf NETLEASH=target/release/netleash`; it then runs that
-binary through `pkexec`.
+To try a build with Bandito, run Bandito with `NETLEASH=target/release/netleash`.
 
 To publish, `scripts/publish.sh` builds the eBPF object, which the crate ships
 instead of `ebpf/`, and publishes `netleash-common` and `netleash`.
 
 ## Limitations
 
-- The systemd unit and the real polkit daemon haven't been tested: the VM has
-  neither. The test bus loads the same D-Bus policy, and the service fails
-  closed when polkit doesn't answer.
 - Programs started from a terminal share the terminal's scope, so their traffic
   is reported under the terminal app.
 - IPv6 extension headers are not followed when reading ports.

@@ -1,15 +1,14 @@
 //! netleash: measures and limits network traffic per app with eBPF.
 //!
-//! Runs as root, attaches the two cgroup_skb programs in `ebpf/` to the
-//! root cgroup, and
+//! Runs as root or with CAP_BPF, CAP_NET_ADMIN and CAP_PERFMON, attaches the two
+//! cgroup_skb programs in `ebpf/` to the root cgroup, and
 //! talks JSON lines on stdin/stdout (see `protocol`). The programs detach
 //! when the helper exits, however it exits: they are held by bpf_link file
 //! descriptors, not left behind in the kernel like tc rules.
 
 mod apps;
-mod dbus;
+mod capabilities;
 mod dns;
-mod install;
 mod limits;
 mod protocol;
 mod qdisc;
@@ -269,28 +268,6 @@ impl Helper {
         Ok(())
     }
 
-    /// Remove every limit, e.g. when the last client leaves.
-    /// Also restores the interface's queueing discipline.
-    fn clear_limits(&mut self) {
-        let apps: Vec<String> = self
-            .slots
-            .iter()
-            .map(|(app, _, _)| app.to_string())
-            .collect();
-        for app in apps {
-            let _ = self.command(Command::Limit {
-                app: Some(app),
-                down: None,
-                up: None,
-            });
-        }
-        let _ = self.command(Command::Limit {
-            app: None,
-            down: None,
-            up: None,
-        });
-    }
-
     /// Apply a command; returns false when the helper should stop.
     fn command(&mut self, command: Command) -> Result<bool> {
         match command {
@@ -482,7 +459,7 @@ impl Drop for Helper {
     }
 }
 
-/// Run as a root child of a front end (through pkexec), on stdin/stdout.
+/// Speak the protocol on stdin/stdout until told to stop or stdin closes.
 fn run() -> Result<()> {
     let (_bpf, maps) = load()?;
     let mut helper = Helper::new(maps)?;
@@ -537,15 +514,16 @@ fn run() -> Result<()> {
 const USAGE: &str = "\
 netleash: see and limit network traffic per app, with eBPF.
 
-  netleash                 run as root, speaking JSON lines on stdin/stdout
-  netleash --dbus          run as the system D-Bus service (as root)
-  netleash --client        bridge stdin/stdout to the service (as the user)
-  netleash --install       install this binary and the service (as root)
-  netleash --uninstall     remove them again (as root)
+  netleash              speak JSON lines on stdin/stdout; needs root, or the
+                        capabilities below
+  netleash --capable    exit 0 if this binary can run without root
   netleash --version
 
---install and --uninstall take --prefix DIR (default /usr).
---dbus --insecure-no-polkit skips authorization; only for tests.
+Run it as root on demand (pkexec netleash, sudo netleash), or give the binary
+the capabilities it needs once, then run it as yourself:
+
+  sudo setcap cap_bpf,cap_net_admin,cap_perfmon+ep $(command -v netleash)
+
 See https://github.com/sigmaSd/netleash for the protocol.";
 
 fn main() {
@@ -559,31 +537,17 @@ fn main() {
         println!("netleash {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let prefix = args
-        .iter()
-        .position(|a| a == "--prefix")
-        .and_then(|i| args.get(i + 1))
-        .map_or("/usr", String::as_str);
-    if has("--install") || has("--uninstall") {
-        let result = if has("--install") {
-            install::install(Path::new(prefix))
-        } else {
-            install::uninstall(Path::new(prefix))
-        };
-        if let Err(error) = result {
-            eprintln!("netleash: {error:#}");
-            std::process::exit(1);
+    if has("--capable") {
+        let missing = capabilities::missing();
+        if missing.is_empty() {
+            println!("netleash can run without root");
+            return;
         }
-        return;
+        println!("netleash needs root, or: {}", missing.join(", "));
+        std::process::exit(1);
     }
-    let result = if has("--dbus") {
-        dbus::serve(!has("--insecure-no-polkit"))
-    } else if has("--client") {
-        dbus::client()
-    } else {
-        run()
-    };
-    if let Err(error) = result {
+    capabilities::pass_to_children();
+    if let Err(error) = run() {
         emit(&Event::Error {
             message: format!("{error:#}"),
         });

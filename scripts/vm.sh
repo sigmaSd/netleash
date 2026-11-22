@@ -13,7 +13,7 @@ cargo build --release
 HELPER=${CARGO_TARGET_DIR:-target}/release/netleash
 mkdir -p vm-test-out
 status=0
-for test in ${1:-vm-test.sh vm-dbus-test.sh}; do
+for test in ${1:-vm-test.sh vm-caps-test.sh}; do
   echo "== $test"
   vng --run "/boot/vmlinuz-$(uname -r)" \
     ${BUSYBOX:+--busybox "$BUSYBOX"} \
