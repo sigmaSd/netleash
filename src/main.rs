@@ -56,9 +56,11 @@ fn load() -> Result<(Ebpf, Maps)> {
             .with_context(|| format!("missing program {name}"))?
             .try_into()?;
         program.load().with_context(|| format!("verifying {name}"))?;
-        // Alongside systemd's own cgroup programs, not instead of them.
+        // aya attaches with a bpf_link (Linux 5.7+), which the kernel always
+        // adds alongside other programs, such as systemd's; it rejects an
+        // explicit multi-attach flag.
         program
-            .attach(&root, attach, CgroupAttachMode::AllowMultiple)
+            .attach(&root, attach, CgroupAttachMode::Single)
             .with_context(|| format!("attaching {name}"))?;
     }
     let mut take = |name: &str| {

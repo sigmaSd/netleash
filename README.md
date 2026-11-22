@@ -103,23 +103,33 @@ Events, one per line on stdout:
 - A sample is sent once a second.
 - `kind` is `app`, `service` or `other`.
 
-## Trying it
+## Testing as root without sudo
+
+`scripts/vm.sh` boots your own kernel in a throwaway VM with
+[virtme-ng](https://github.com/arighi/virtme-ng) and runs
+`scripts/vm-test.sh` there as root. That script:
+
+- builds a veth pair to a server in its own network namespace;
+- runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
+- checks attribution, per-app and global limits in both directions, error
+  reporting, and that nothing stays attached after the helper exits.
+
+It needs `/dev/kvm`, QEMU, `uv tool install virtme-ng`, and a static busybox.
+On Fedora you can extract one without installing it:
 
 ```sh
-sudo ~/dev/rust/cargo_target_dir/release/bandito-helper
+dnf download busybox && rpm2cpio busybox-*.x86_64.rpm | cpio -idm ./usr/bin/busybox
+BUSYBOX=$PWD/usr/bin/busybox scripts/vm.sh
 ```
 
-Type `{"cmd":"interface","name":"wlan0"}` and watch the samples. With Bandito:
+To try the helper on your own machine with Bandito:
 
 ```sh
-BANDITO_BACKEND=ebpf BANDITO_HELPER=~/dev/rust/cargo_target_dir/release/bandito-helper deno run -A src/main.ts
+BANDITO_BACKEND=ebpf BANDITO_HELPER=target/release/bandito-helper deno run -A src/main.ts
 ```
 
 ## Not done yet
 
-- The loading and verifier path hasn't run outside a root shell yet. The
-  userspace, the protocol and the Bandito side are tested; the kernel side
-  needs a live run.
 - It runs through `pkexec` like the old helpers. The plan is to install it as
   a system service on the system D-Bus, with polkit deciding who may change
   limits.
