@@ -16,5 +16,18 @@ cargo build --release
 out=$(find "${CARGO_TARGET_DIR:-target}/release/build" -name netleash.bpf.o \
   -newer build.rs -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2)
 cp "$out" netleash.bpf.o
-# Both in one call, in dependency order.
-cargo publish -p netleash-common -p netleash --allow-dirty "$@"
+# In dependency order, skipping versions crates.io already has.
+packages=""
+for package in netleash-common netleash; do
+  version=$(cargo pkgid -p "$package" | sed 's/.*[#@]//')
+  status=$(curl -s -o /dev/null -w '%{http_code}' -A netleash-publish \
+    "https://crates.io/api/v1/crates/$package/$version")
+  if [ "$status" = 200 ]; then
+    echo "$package $version is already on crates.io"
+  else
+    packages="$packages -p $package"
+  fi
+done
+[ -n "$packages" ] || exit 0
+# shellcheck disable=SC2086
+cargo publish $packages --allow-dirty "$@"
