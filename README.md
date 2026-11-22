@@ -25,7 +25,8 @@ From crates.io (the eBPF programs come precompiled, so stable Rust is enough):
 cargo install netleash
 ```
 
-Or download the static `netleash` binary from the
+Or download the static binary for your machine, `netleash-x86_64` or
+`netleash-aarch64`, from the
 [latest release](https://github.com/sigmaSd/netleash/releases/latest) and
 `chmod +x` it.
 
@@ -117,6 +118,14 @@ Then:
 
 ```sh
 cargo build --release
+```
+
+For a static aarch64 binary from any host (`.cargo/config.toml` links it with
+Rust's own `rust-lld`):
+
+```sh
+rustup target add aarch64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl
 ```
 
 - `build.rs` compiles `ebpf/` for `bpfel-unknown-none` with that nightly, for
