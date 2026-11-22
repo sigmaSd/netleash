@@ -139,9 +139,20 @@ impl Cgroup {
     }
 }
 
-/// Every cgroup under `root`, by cgroup id (its directory's inode number).
+/// Every cgroup from `root` down, by cgroup id (its directory's inode
+/// number). The root itself is systemd's `-.slice`; processes sit there in
+/// containers and before systemd moves them.
 pub fn scan(root: &Path) -> HashMap<u64, Cgroup> {
     let mut found = HashMap::new();
+    if let Ok(meta) = fs::metadata(root) {
+        found.insert(
+            meta.ino(),
+            Cgroup {
+                path: root.to_path_buf(),
+                unit: classify("-.slice"),
+            },
+        );
+    }
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
