@@ -50,17 +50,31 @@ R=$(traffic "$APP_B" down 10.9.0.2 100000000)
 echo "Uploader download, not limited: $R B/s"
 check "other apps are not limited" "[ $R -gt 20000000 ]"
 
-# Per-app upload limit, IPv6.
+# Per-app upload limit, IPv6, paced rather than dropped.
+retransmits() { awk '/^Tcp:/ { if (n++) print $13 }' /proc/net/snmp; }
 send '{"cmd":"limit","app":"org.example.Uploader","down":null,"up":1000000}'
 sleep 1
+check "fq is installed for paced uploads" "tc qdisc show dev veth0 root | grep -q '^qdisc fq '"
+BEFORE=$(retransmits)
 R=$(traffic "$APP_B" up fd00::2 5000000)
-echo "Uploader upload limited to 1 MB/s (IPv6): $R B/s"
+RETRANSMITS=$(($(retransmits) - BEFORE))
+echo "Uploader upload limited to 1 MB/s (IPv6): $R B/s, $RETRANSMITS TCP retransmissions"
 check "per-app upload limit holds (IPv6)" "within $R 1000000"
+check "paced uploads barely retransmit" "[ $RETRANSMITS -lt 20 ]"
+
+# Without fq (a tunnel device, or someone changed it), limits drop instead.
+tc qdisc del dev veth0 root
+BEFORE=$(retransmits)
+R=$(traffic "$APP_B" up fd00::2 5000000)
+RETRANSMITS=$(($(retransmits) - BEFORE))
+echo "same limit without fq: $R B/s, $RETRANSMITS TCP retransmissions"
+check "upload limits hold without fq too" "within $R 1000000"
 
 # Removing limits.
 send '{"cmd":"limit","app":"org.example.Fetcher","down":null,"up":null}'
 send '{"cmd":"limit","app":"org.example.Uploader","down":null,"up":null}'
 sleep 1
+check "the default queueing discipline is back" "! tc qdisc show dev veth0 root | grep -q '^qdisc fq '"
 R=$(traffic "$APP_A" down 10.9.0.2 100000000)
 echo "Fetcher download after removing its limit: $R B/s"
 check "removing a limit restores full speed" "[ $R -gt 20000000 ]"

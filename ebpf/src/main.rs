@@ -140,21 +140,77 @@ fn take(index: u32, len: u32, now: u64) -> bool {
     }
 }
 
-/// Whether the packet fits the cgroup's bucket and the global one.
+/// The cgroup's bucket slot in one direction, if it has a limit.
 #[inline(always)]
-fn allowed(cgroup: u64, direction: u32, len: u32) -> bool {
-    // SAFETY: plain helper call.
-    let now = unsafe { bpf_ktime_get_ns() };
+fn bucket_of(cgroup: u64, direction: u32) -> Option<u32> {
     let key = BucketKey { cgroup, direction, pad: 0 };
     // SAFETY: the value is copied out immediately.
-    if let Some(index) = unsafe { CGROUP_BUCKETS.get(&key) }.copied()
-        && index < MAX_BUCKETS
+    unsafe { CGROUP_BUCKETS.get(&key) }
+        .copied()
+        .filter(|index| *index < MAX_BUCKETS)
+}
+
+/// Whether a download packet fits the cgroup's bucket and the global one.
+/// Incoming packets can't be delayed, only dropped; TCP then slows down.
+#[inline(always)]
+fn download_allowed(cgroup: u64, len: u32, now: u64) -> bool {
+    if let Some(index) = bucket_of(cgroup, DIR_DOWN)
         && !take(index, len, now)
     {
         return false;
     }
-    let global = if direction == DIR_DOWN { GLOBAL_DOWN } else { GLOBAL_UP };
-    take(global, len, now)
+    take(GLOBAL_DOWN, len, now)
+}
+
+/// How far ahead an upload packet may be scheduled before it is dropped.
+/// With `fq`, TCP keeps far less than this queued. Without `fq`, packets
+/// leave at once, so this is the burst a limit lets through before it
+/// drops: half a second of traffic.
+const HORIZON_NS: u64 = NS_PER_SEC / 2;
+
+/// Schedule `len` bytes on a pacing bucket: returns when they may leave
+/// (0 if the bucket has no limit), or None to drop them. For upload buckets,
+/// `last_ns` is the time the bucket's next byte may leave.
+#[inline(always)]
+fn pace(index: u32, len: u32, now: u64) -> Option<u64> {
+    let Some(bucket) = BUCKETS.get_ptr_mut(index) else {
+        return Some(0);
+    };
+    // SAFETY: as in `take`: a map value, shared only through atomics.
+    unsafe {
+        let rate = (*bucket).rate;
+        if rate == 0 {
+            return Some(0);
+        }
+        let delta = len as u64 * NS_PER_SEC / rate;
+        let next = addr_of_mut!((*bucket).last_ns);
+        // An idle bucket starts from now; a busy one queues behind itself.
+        let old = load(next);
+        let start = if old < now && compare_exchange(next, old, now + delta) {
+            now
+        } else {
+            fetch_add(next, delta)
+        };
+        if start > now + HORIZON_NS {
+            fetch_add(next, delta.wrapping_neg());
+            return None;
+        }
+        Some(start)
+    }
+}
+
+/// When an upload packet may leave under its cgroup's and the global limit,
+/// or None to drop it. The time goes in the packet's timestamp, which the
+/// `fq` queueing discipline honors (Earliest Departure Time); without `fq`
+/// the horizon still drops what is over the rate.
+#[inline(always)]
+fn upload_departure(cgroup: u64, len: u32, now: u64) -> Option<u64> {
+    let own = match bucket_of(cgroup, DIR_UP) {
+        Some(index) => pace(index, len, now)?,
+        None => 0,
+    };
+    let global = pace(GLOBAL_UP, len, now)?;
+    Some(own.max(global))
 }
 
 /// Fill in a flow's remote address and ports from the packet's headers.
@@ -217,9 +273,21 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
     // __sk_buff.protocol is in network byte order.
     let protocol = u16::from_be(protocol as u16);
 
-    // SAFETY: plain helper call on the program's own context.
+    // SAFETY: plain helper calls on the program's own context.
     let cgroup = unsafe { bpf_skb_cgroup_id(skb) };
-    if !allowed(cgroup, direction, len) {
+    let now = unsafe { bpf_ktime_get_ns() };
+    if direction == DIR_UP {
+        let Some(departure) = upload_departure(cgroup, len, now) else {
+            return DROP;
+        };
+        // SAFETY: cgroup_skb egress programs may set the timestamp. Keep a
+        // later one TCP's own pacing already chose.
+        unsafe {
+            if departure > now && departure > (*skb).tstamp {
+                (*skb).tstamp = departure;
+            }
+        }
+    } else if !download_allowed(cgroup, len, now) {
         return DROP;
     }
 

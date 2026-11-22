@@ -16,8 +16,14 @@ so the cgroup names the app.
 
 - **Counting:** bytes per cgroup and per connection (remote address and ports),
   IPv4 and IPv6, on the chosen interface only.
-- **Limiting:** a token bucket per limited app and direction, plus a global one.
-  Packets over the rate are dropped, and TCP slows down to match.
+- **Limiting:** a limit per app and direction, plus a global one.
+  - Uploads are paced: each packet gets a departure time (EDT), and the `fq`
+    queueing discipline, which the helper puts on the interface while an
+    upload limit is set, sends it then. Nothing is dropped and TCP doesn't
+    retransmit. Without `fq`, packets more than half a second ahead are
+    dropped instead.
+  - Downloads can't be delayed, so packets over a token bucket's rate are
+    dropped, and TCP slows down to match.
 - **Naming:** cgroups are mapped to application IDs (desktop file names) by
   reading `/sys/fs/cgroup`. Services are named after their unit, and other units
   after their busiest process.
@@ -145,7 +151,8 @@ How the pieces talk:
 
 - builds a veth pair to a server in its own network namespace;
 - runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
-- checks attribution, per-app and global limits in both directions, error
+- checks attribution, per-app and global limits in both directions, upload
+  pacing through `fq` without retransmissions, limits without `fq`, error
   reporting, and that nothing stays attached after the helper exits.
 
 `scripts/vm-dbus-test.sh` runs in a second VM. It starts a private system bus
@@ -176,8 +183,6 @@ BANDITO_BACKEND=ebpf BANDITO_HELPER=target/release/bandito-helper deno run -A sr
 - The systemd unit and the real polkit daemon haven't been tested: the VM has
   neither. The test bus loads the same D-Bus policy, and the service fails
   closed when polkit doesn't answer.
-- Upload limiting drops packets. Pacing with EDT and the `fq` qdisc would be
-  smoother.
 - Programs started from a terminal share the terminal's scope, so their traffic
   is reported under the terminal app.
 - IPv6 extension headers are not followed when reading ports.

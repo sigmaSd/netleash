@@ -11,6 +11,7 @@ mod dbus;
 mod dns;
 mod limits;
 mod protocol;
+mod qdisc;
 
 use anyhow::{bail, Context, Result};
 use apps::{Cgroup, Kind, CGROUP_ROOT};
@@ -173,6 +174,10 @@ struct Helper {
     /// Limits by app id and direction, in bytes per second.
     limits: HashMap<(String, Direction), u64>,
     resolver: dns::Resolver,
+    /// Whether a global upload limit is set.
+    global_up: bool,
+    /// The interface this helper put the `fq` queueing discipline on.
+    fq: Option<String>,
 }
 
 impl Helper {
@@ -190,6 +195,8 @@ impl Helper {
             slots: Slots::default(),
             limits: HashMap::new(),
             resolver: dns::Resolver::new(),
+            global_up: false,
+            fq: None,
         };
         helper.rescan();
         helper.maps.config.set(0, &Config { ifindex: 0, enabled: 1 }, 0)?;
@@ -244,6 +251,7 @@ impl Helper {
     }
 
     /// Remove every limit, e.g. when the last client leaves.
+    /// Also restores the interface's queueing discipline.
     fn clear_limits(&mut self) {
         let apps: Vec<String> = self.slots.iter().map(|(app, _, _)| app.to_string()).collect();
         for app in apps {
@@ -263,10 +271,13 @@ impl Helper {
                     .set(0, &Config { ifindex: index, enabled: 1 }, 0)?;
                 self.iface_totals = interface_totals(Some(&name));
                 self.interface = Some(name);
+                self.sync_qdisc();
             }
             Command::Limit { app: None, down, up } => {
                 self.set_bucket(GLOBAL_DOWN, down)?;
                 self.set_bucket(GLOBAL_UP, up)?;
+                self.global_up = up.is_some();
+                self.sync_qdisc();
             }
             Command::Limit { app: Some(app), down, up } => {
                 for (direction, rate) in [(Direction::Down, down), (Direction::Up, up)] {
@@ -288,9 +299,31 @@ impl Helper {
                     }
                 }
                 self.sync_cgroup_buckets();
+                self.sync_qdisc();
             }
         }
         Ok(true)
+    }
+
+    /// Upload limits pace packets with departure times, which only the `fq`
+    /// queueing discipline honors. Put `fq` on the interface while an upload
+    /// limit is set, and give the interface its default back afterwards.
+    /// Without `fq`, limits still hold by dropping, just less smoothly.
+    fn sync_qdisc(&mut self) {
+        let wanted = (self.global_up || self.limits.keys().any(|(_, d)| *d == Direction::Up))
+            .then(|| self.interface.clone())
+            .flatten();
+        if self.fq == wanted {
+            return;
+        }
+        if let Some(previous) = self.fq.take() {
+            qdisc::restore(&previous);
+        }
+        if let Some(interface) = wanted
+            && qdisc::install_fq(&interface)
+        {
+            self.fq = Some(interface);
+        }
     }
 
     fn sample(&mut self) -> Sample {
@@ -383,6 +416,14 @@ impl Helper {
         apps.sort_by_key(|a| std::cmp::Reverse(a.rates.rx + a.rates.tx));
         connections.sort_by_key(|c| std::cmp::Reverse(c.rates.rx + c.rates.tx));
         Sample { interface: self.interface.clone(), total, apps, connections }
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        if let Some(interface) = self.fq.take() {
+            qdisc::restore(&interface);
+        }
     }
 }
 
