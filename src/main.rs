@@ -112,6 +112,17 @@ fn interface_totals(interface: Option<&str>) -> (u64, u64) {
     }
 }
 
+/// The link-layer header each frame on an interface carries: 14 bytes on
+/// Ethernet and Wi-Fi (which the kernel presents as Ethernet), none on
+/// tunnels such as WireGuard.
+fn link_header_len(interface: &str) -> u64 {
+    const ARPHRD_ETHER: &str = "1";
+    match fs::read_to_string(format!("/sys/class/net/{interface}/type")) {
+        Ok(kind) if kind.trim() == ARPHRD_ETHER => 14,
+        _ => 0,
+    }
+}
+
 fn ifindex(name: &str) -> Result<u32> {
     let c_name = std::ffi::CString::new(name)?;
     // SAFETY: c_name is a valid NUL-terminated string.
@@ -176,6 +187,8 @@ struct Helper {
     /// Limits by app id and direction, in bytes per second.
     limits: HashMap<(String, Direction), u64>,
     resolver: dns::Resolver,
+    /// Link-layer header bytes per frame on the interface.
+    header_len: u64,
     /// Whether a global upload limit is set.
     global_up: bool,
     /// The interface this helper put the `fq` queueing discipline on.
@@ -197,6 +210,7 @@ impl Helper {
             slots: Slots::default(),
             limits: HashMap::new(),
             resolver: dns::Resolver::new(),
+            header_len: 0,
             global_up: false,
             fq: None,
         };
@@ -283,6 +297,7 @@ impl Helper {
                     0,
                 )?;
                 self.iface_totals = interface_totals(Some(&name));
+                self.header_len = link_header_len(&name);
                 self.interface = Some(name);
                 self.sync_qdisc();
             }
@@ -351,12 +366,18 @@ impl Helper {
         let elapsed = self.last_tick.elapsed().as_secs_f64().max(0.001);
         self.last_tick = Instant::now();
 
-        // Per-cgroup byte counters, summed over CPUs.
+        // Per-cgroup byte counters, summed over CPUs. The programs see IP
+        // packets; the interface's counters, which unidentified traffic is
+        // worked out from, also count each frame's link-layer header.
+        let header = self.header_len;
         let mut current: HashMap<u64, (u64, u64)> = HashMap::new();
         for (cgroup, values) in self.maps.app_stats.iter().flatten() {
-            let sum = values
-                .iter()
-                .fold((0, 0), |(rx, tx), v| (rx + v.rx_bytes, tx + v.tx_bytes));
+            let sum = values.iter().fold((0, 0), |(rx, tx), v| {
+                (
+                    rx + v.rx_bytes + v.rx_packets * header,
+                    tx + v.tx_bytes + v.tx_packets * header,
+                )
+            });
             current.insert(cgroup, sum);
         }
         if current.keys().any(|id| !self.ids.contains_key(id))

@@ -217,13 +217,15 @@ fn upload_departure(cgroup: u64, len: u32, now: u64) -> Option<u64> {
     Some(own.max(global))
 }
 
-/// Fill in a flow's remote address and ports from the packet's headers.
 #[inline(always)]
-fn parse(ctx: &SkBuffContext, protocol: u16, direction: u32, key: &mut FlowKey) -> bool {
+/// Fill in a flow's remote address and ports from the packet's headers, and
+/// return the length of its IP and transport headers, which every segment of
+/// a GSO/GRO packet repeats on the wire.
+fn parse(ctx: &SkBuffContext, protocol: u16, direction: u32, key: &mut FlowKey) -> Option<u64> {
     let up = direction == DIR_UP;
     let l4 = if protocol == ETH_P_IP {
         let Ok(ip) = ctx.load::<[u8; 20]>(0) else {
-            return false;
+            return None;
         };
         key.family = AF_INET;
         key.protocol = ip[9];
@@ -240,17 +242,17 @@ fn parse(ctx: &SkBuffContext, protocol: u16, direction: u32, key: &mut FlowKey) 
     } else if protocol == ETH_P_IPV6 {
         // Addresses at 8 (source) and 24 (destination).
         let Ok(next) = ctx.load::<u8>(6) else {
-            return false;
+            return None;
         };
         let Ok(remote) = ctx.load::<[u8; 16]>(if up { 24 } else { 8 }) else {
-            return false;
+            return None;
         };
         key.family = AF_INET6;
         key.protocol = next;
         key.remote = remote;
         40
     } else {
-        return false;
+        return None;
     };
 
     if (key.protocol == IPPROTO_TCP || key.protocol == IPPROTO_UDP)
@@ -261,7 +263,15 @@ fn parse(ctx: &SkBuffContext, protocol: u16, direction: u32, key: &mut FlowKey) 
         key.local_port = if up { source } else { dest };
         key.remote_port = if up { dest } else { source };
     }
-    true
+    let transport = match key.protocol {
+        // The data offset, in 32-bit words, is the top half of byte 12.
+        IPPROTO_TCP => ctx
+            .load::<u8>(l4 + 12)
+            .map_or(20, |b| (b >> 4) as usize * 4),
+        IPPROTO_UDP => 8,
+        _ => 0,
+    };
+    Some((l4 + transport) as u64)
 }
 
 #[inline(always)]
@@ -274,7 +284,11 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
     }
     let skb = ctx.as_ptr() as *mut __sk_buff;
     // SAFETY: the context is a valid __sk_buff for this program run.
-    let (ifindex, protocol, len) = unsafe { ((*skb).ifindex, (*skb).protocol, (*skb).len) };
+    let (ifindex, protocol, len, segments) =
+        unsafe { ((*skb).ifindex, (*skb).protocol, (*skb).len, (*skb).gso_segs) };
+    // A GSO/GRO packet goes on the wire as several frames, each with its own
+    // link-layer header; userspace adds those headers back from this count.
+    let frames = segments.max(1) as u64;
     if ifindex == LOOPBACK_IFINDEX || (config.ifindex != 0 && ifindex != config.ifindex) {
         return PASS;
     }
@@ -299,6 +313,16 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
         return DROP;
     }
 
+    let mut key = FlowKey {
+        cgroup,
+        ..FlowKey::default()
+    };
+    let headers = parse(ctx, protocol, direction, &mut key);
+    // Bytes as the interface counts them: each extra segment of a GSO/GRO
+    // packet repeats the IP and transport headers. (Userspace adds the
+    // link-layer header per frame.)
+    let bytes = len as u64 + (frames - 1) * headers.unwrap_or(0);
+
     let counters = match APP_STATS.get_ptr_mut(&cgroup) {
         Some(counters) => Some(counters),
         None => {
@@ -310,20 +334,16 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
         // SAFETY: per-CPU value: no other CPU writes this copy.
         unsafe {
             if direction == DIR_UP {
-                (*counters).tx_bytes += len as u64;
-                (*counters).tx_packets += 1;
+                (*counters).tx_bytes += bytes;
+                (*counters).tx_packets += frames;
             } else {
-                (*counters).rx_bytes += len as u64;
-                (*counters).rx_packets += 1;
+                (*counters).rx_bytes += bytes;
+                (*counters).rx_packets += frames;
             }
         }
     }
 
-    let mut key = FlowKey {
-        cgroup,
-        ..FlowKey::default()
-    };
-    if parse(ctx, protocol, direction, &mut key) {
+    if headers.is_some() {
         let flow = match FLOWS.get_ptr_mut(&key) {
             Some(flow) => Some(flow),
             None => {
@@ -334,12 +354,12 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
         if let Some(flow) = flow {
             // SAFETY: shared map value, updated only through atomics.
             unsafe {
-                let bytes = if direction == DIR_UP {
+                let counter = if direction == DIR_UP {
                     addr_of_mut!((*flow).tx_bytes)
                 } else {
                     addr_of_mut!((*flow).rx_bytes)
                 };
-                fetch_add(bytes, len as u64);
+                fetch_add(counter, bytes);
                 (*flow).last_seen_ns = bpf_ktime_get_ns();
             }
         }

@@ -11,6 +11,11 @@ ip -n srv link set lo up
 ip -n srv addr add 10.9.0.2/24 dev veth1
 ip -n srv addr add fd00::2/64 dev veth1 nodad
 ip -n srv link set veth1 up
+# Make the link count frames the way hardware does: no TSO, so the stack
+# splits GSO packets into frames before the link (as for Wi-Fi), and no GRO,
+# so received frames arrive one by one.
+ethtool -K veth0 tso off gro off > /dev/null
+ip netns exec srv ethtool -K veth1 tso off gro off > /dev/null
 
 CG=/sys/fs/cgroup
 APP_A="app-gnome-org.example.Fetcher-42.scope"

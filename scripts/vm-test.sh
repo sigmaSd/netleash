@@ -40,6 +40,27 @@ check "connections carry remote addresses and ports" \
   "grep -q '\"remote\":\"10.9.0.2\"' $OUT/events.jsonl && grep -q '\"remote\":\"fd00::2\"' $OUT/events.jsonl && grep -q '\"remotePort\":9000' $OUT/events.jsonl"
 check "loopback is not counted" "! grep -q '\"remote\":\"127.0.0.1\"' $OUT/events.jsonl"
 
+# Apps add up to the interface's own counters, link-layer headers included:
+# per mille of busy samples' bytes attributed to apps, in each direction.
+attributed() { # rx|tx
+  python3 - "$OUT/events.jsonl" "$1" <<'PY'
+import json, sys
+direction = sys.argv[2]
+shares = []
+for line in open(sys.argv[1]):
+    event = json.loads(line)
+    if event.get("type") != "sample" or event["total"][direction] < 10_000_000:
+        continue
+    apps = sum(app[direction] for app in event["apps"])
+    shares.append(apps * 1000 // event["total"][direction])
+print(min(shares) if shares else 0)
+PY
+}
+RX=$(attributed rx)
+TX=$(attributed tx)
+echo "apps' share of busy samples: download $RX/1000, upload $TX/1000"
+check "apps add up to the interface's counters" "[ $RX -ge 990 ] && [ $RX -le 1010 ] && [ $TX -ge 990 ] && [ $TX -le 1010 ]"
+
 # Per-app download limit, IPv4.
 send '{"cmd":"limit","app":"org.example.Fetcher","down":2000000,"up":null}'
 sleep 1

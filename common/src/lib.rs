@@ -29,7 +29,7 @@ pub struct Config {
     pub enabled: u32,
 }
 
-/// Bytes and packets per cgroup, per CPU.
+/// Bytes (IP packet lengths) and wire frames per cgroup, per CPU.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct AppCounters {
