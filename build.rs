@@ -24,8 +24,21 @@ fn main() {
         "-Clink-arg=--btf".into(),
     ];
     let status = Command::new("rustup")
-        .args(["run", TOOLCHAIN, "cargo", "build", "--package", "bandito-helper-ebpf"])
-        .args(["--release", "--target", "bpfel-unknown-none", "-Z", "build-std=core"])
+        .args([
+            "run",
+            TOOLCHAIN,
+            "cargo",
+            "build",
+            "--package",
+            "bandito-helper-ebpf",
+        ])
+        .args([
+            "--release",
+            "--target",
+            "bpfel-unknown-none",
+            "-Z",
+            "build-std=core",
+        ])
         .arg("--target-dir")
         .arg(&target_dir)
         .env("CARGO_ENCODED_RUSTFLAGS", flags.join("\x1f"))

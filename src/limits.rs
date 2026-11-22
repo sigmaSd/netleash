@@ -63,7 +63,9 @@ impl Slots {
 
     /// Every app with a limit, with its direction and slot.
     pub fn iter(&self) -> impl Iterator<Item = (&str, Direction, u32)> {
-        self.assigned.iter().map(|((app, dir), slot)| (app.as_str(), *dir, *slot))
+        self.assigned
+            .iter()
+            .map(|((app, dir), slot)| (app.as_str(), *dir, *slot))
     }
 }
 
@@ -80,11 +82,21 @@ mod tests {
     #[test]
     fn slots_skip_the_global_ones_and_are_reused() {
         let mut slots = Slots::default();
-        let a = slots.get_or_assign("org.mozilla.firefox", Direction::Down).unwrap();
-        let b = slots.get_or_assign("org.mozilla.firefox", Direction::Up).unwrap();
+        let a = slots
+            .get_or_assign("org.mozilla.firefox", Direction::Down)
+            .unwrap();
+        let b = slots
+            .get_or_assign("org.mozilla.firefox", Direction::Up)
+            .unwrap();
         assert!(a >= 2 && b >= 2 && a != b);
-        assert_eq!(slots.get_or_assign("org.mozilla.firefox", Direction::Down), Some(a));
-        assert_eq!(slots.release("org.mozilla.firefox", Direction::Down), Some(a));
+        assert_eq!(
+            slots.get_or_assign("org.mozilla.firefox", Direction::Down),
+            Some(a)
+        );
+        assert_eq!(
+            slots.release("org.mozilla.firefox", Direction::Down),
+            Some(a)
+        );
         assert_eq!(slots.get("org.mozilla.firefox", Direction::Down), None);
         assert_eq!(slots.get_or_assign("steam", Direction::Down), Some(a));
     }
@@ -93,7 +105,11 @@ mod tests {
     fn slots_run_out_cleanly() {
         let mut slots = Slots::default();
         for i in 0..(MAX_BUCKETS - 2) {
-            assert!(slots.get_or_assign(&i.to_string(), Direction::Down).is_some());
+            assert!(
+                slots
+                    .get_or_assign(&i.to_string(), Direction::Down)
+                    .is_some()
+            );
         }
         assert_eq!(slots.get_or_assign("one more", Direction::Down), None);
     }

@@ -21,8 +21,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum Command {
-    Interface { name: String },
-    Limit { app: Option<String>, down: Option<u64>, up: Option<u64> },
+    Interface {
+        name: String,
+    },
+    Limit {
+        app: Option<String>,
+        down: Option<u64>,
+        up: Option<u64>,
+    },
     Stop,
 }
 
@@ -89,14 +95,27 @@ mod tests {
     #[test]
     fn parses_commands() {
         let parse = |s: &str| serde_json::from_str::<Command>(s).unwrap();
-        assert_eq!(parse(r#"{"cmd":"interface","name":"wlan0"}"#), Command::Interface { name: "wlan0".into() });
+        assert_eq!(
+            parse(r#"{"cmd":"interface","name":"wlan0"}"#),
+            Command::Interface {
+                name: "wlan0".into()
+            }
+        );
         assert_eq!(
             parse(r#"{"cmd":"limit","app":"steam","down":2500000,"up":null}"#),
-            Command::Limit { app: Some("steam".into()), down: Some(2_500_000), up: None }
+            Command::Limit {
+                app: Some("steam".into()),
+                down: Some(2_500_000),
+                up: None
+            }
         );
         assert_eq!(
             parse(r#"{"cmd":"limit","app":null,"down":null,"up":1000}"#),
-            Command::Limit { app: None, down: None, up: Some(1000) }
+            Command::Limit {
+                app: None,
+                down: None,
+                up: Some(1000)
+            }
         );
         assert_eq!(parse(r#"{"cmd":"stop"}"#), Command::Stop);
         assert!(serde_json::from_str::<Command>(r#"{"cmd":"nope"}"#).is_err());

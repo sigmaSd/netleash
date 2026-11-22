@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     net::IpAddr,
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -32,12 +32,20 @@ impl Resolver {
         for _ in 0..WORKERS {
             let jobs = Arc::clone(&jobs);
             let cache = Arc::clone(&cache);
-            thread::spawn(move || loop {
-                let Ok(address) = jobs.lock().unwrap().recv() else { return };
-                let name = dns_lookup::lookup_addr(&address).ok()
-                    // getnameinfo returns the address itself when there is no name.
-                    .filter(|name| name.parse::<IpAddr>().is_err());
-                cache.lock().unwrap().insert(address, Entry::Done(name, Instant::now()));
+            thread::spawn(move || {
+                loop {
+                    let Ok(address) = jobs.lock().unwrap().recv() else {
+                        return;
+                    };
+                    let name = dns_lookup::lookup_addr(&address)
+                        .ok()
+                        // getnameinfo returns the address itself when there is no name.
+                        .filter(|name| name.parse::<IpAddr>().is_err());
+                    cache
+                        .lock()
+                        .unwrap()
+                        .insert(address, Entry::Done(name, Instant::now()));
+                }
             });
         }
         Self { cache, queue }

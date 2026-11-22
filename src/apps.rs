@@ -63,7 +63,11 @@ pub fn classify(name: &str) -> Unit {
     } else if let Some(stem) = name.strip_suffix(".service") {
         (stem, false)
     } else {
-        return Unit { id: unescape(name), kind: Kind::Other, unit };
+        return Unit {
+            id: unescape(name),
+            kind: Kind::Other,
+            unit,
+        };
     };
 
     if let Some(rest) = stem.strip_prefix("app-") {
@@ -72,22 +76,42 @@ pub fn classify(name: &str) -> Unit {
         if scope && parts.len() >= 2 {
             parts.pop(); // -<RANDOM>
         }
-        let id = if parts.len() >= 2 { parts[parts.len() - 1] } else { parts[0] };
+        let id = if parts.len() >= 2 {
+            parts[parts.len() - 1]
+        } else {
+            parts[0]
+        };
         let id = id.split('@').next().unwrap_or(id);
-        return Unit { id: unescape(id), kind: Kind::App, unit };
+        return Unit {
+            id: unescape(id),
+            kind: Kind::App,
+            unit,
+        };
     }
     if let Some(rest) = stem.strip_prefix("dbus-") {
         // D-Bus activated: dbus-<bus name>-<ApplicationID>@<RANDOM>.service
         if let Some((_, id)) = rest.split_once('-') {
             let id = id.split('@').next().unwrap_or(id);
-            return Unit { id: unescape(id), kind: Kind::App, unit };
+            return Unit {
+                id: unescape(id),
+                kind: Kind::App,
+                unit,
+            };
         }
     }
     if scope {
-        return Unit { id: unescape(stem), kind: Kind::Other, unit };
+        return Unit {
+            id: unescape(stem),
+            kind: Kind::Other,
+            unit,
+        };
     }
     let id = stem.split('@').next().unwrap_or(stem);
-    Unit { id: unescape(id), kind: Kind::Service, unit }
+    Unit {
+        id: unescape(id),
+        kind: Kind::Service,
+        unit,
+    }
 }
 
 /// A cgroup Bandito reports traffic for.
@@ -120,7 +144,9 @@ pub fn scan(root: &Path) -> HashMap<u64, Cgroup> {
     let mut found = HashMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else { continue };
             if !meta.is_dir() {
@@ -128,7 +154,13 @@ pub fn scan(root: &Path) -> HashMap<u64, Cgroup> {
             }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            found.insert(meta.ino(), Cgroup { path: path.clone(), unit: classify(&name) });
+            found.insert(
+                meta.ino(),
+                Cgroup {
+                    path: path.clone(),
+                    unit: classify(&name),
+                },
+            );
             stack.push(path);
         }
     }
@@ -146,29 +178,56 @@ mod tests {
 
     #[test]
     fn app_scopes_with_and_without_launcher() {
-        assert_eq!(id("app-gnome-org.mozilla.firefox-9848.scope"), ("org.mozilla.firefox".into(), Kind::App));
-        assert_eq!(id("app-com.anthropic.Claude-9687.scope"), ("com.anthropic.Claude".into(), Kind::App));
-        assert_eq!(id("app-flatpak-com.valvesoftware.Steam-2345.scope"), ("com.valvesoftware.Steam".into(), Kind::App));
-        assert_eq!(id("app-gnome-firefox-12.scope"), ("firefox".into(), Kind::App));
+        assert_eq!(
+            id("app-gnome-org.mozilla.firefox-9848.scope"),
+            ("org.mozilla.firefox".into(), Kind::App)
+        );
+        assert_eq!(
+            id("app-com.anthropic.Claude-9687.scope"),
+            ("com.anthropic.Claude".into(), Kind::App)
+        );
+        assert_eq!(
+            id("app-flatpak-com.valvesoftware.Steam-2345.scope"),
+            ("com.valvesoftware.Steam".into(), Kind::App)
+        );
+        assert_eq!(
+            id("app-gnome-firefox-12.scope"),
+            ("firefox".into(), Kind::App)
+        );
     }
 
     #[test]
     fn escaped_dashes_stay_in_the_id() {
-        assert_eq!(id(r"app-gnome-gnome\x2dterminal-77.scope"), ("gnome-terminal".into(), Kind::App));
+        assert_eq!(
+            id(r"app-gnome-gnome\x2dterminal-77.scope"),
+            ("gnome-terminal".into(), Kind::App)
+        );
     }
 
     #[test]
     fn app_services_and_dbus_activation() {
-        assert_eq!(id("app-gnome-org.gnome.Evolution@a1b2.service"), ("org.gnome.Evolution".into(), Kind::App));
-        assert_eq!(id("dbus-:1.21-org.a11y.atspi.Registry@0.service"), ("org.a11y.atspi.Registry".into(), Kind::App));
+        assert_eq!(
+            id("app-gnome-org.gnome.Evolution@a1b2.service"),
+            ("org.gnome.Evolution".into(), Kind::App)
+        );
+        assert_eq!(
+            id("dbus-:1.21-org.a11y.atspi.Registry@0.service"),
+            ("org.a11y.atspi.Registry".into(), Kind::App)
+        );
     }
 
     #[test]
     fn system_services_and_other_units() {
-        assert_eq!(id("NetworkManager.service"), ("NetworkManager".into(), Kind::Service));
+        assert_eq!(
+            id("NetworkManager.service"),
+            ("NetworkManager".into(), Kind::Service)
+        );
         assert_eq!(id("getty@tty1.service"), ("getty".into(), Kind::Service));
         assert_eq!(id("session-2.scope"), ("session-2".into(), Kind::Other));
-        assert_eq!(id(r"app-gnome\x2dsession\x2dmanager.slice"), (r"app-gnome-session-manager.slice".into(), Kind::Other));
+        assert_eq!(
+            id(r"app-gnome\x2dsession\x2dmanager.slice"),
+            (r"app-gnome-session-manager.slice".into(), Kind::Other)
+        );
     }
 
     #[test]

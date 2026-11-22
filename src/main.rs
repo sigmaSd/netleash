@@ -13,15 +13,15 @@ mod limits;
 mod protocol;
 mod qdisc;
 
-use anyhow::{bail, Context, Result};
-use apps::{Cgroup, Kind, CGROUP_ROOT};
+use anyhow::{Context, Result, bail};
+use apps::{CGROUP_ROOT, Cgroup, Kind};
 use aya::{
+    Ebpf,
     maps::{Array, HashMap as BpfHashMap, MapData, PerCpuHashMap},
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
-    Ebpf,
 };
 use bandito_helper_common::{AppCounters, Bucket, BucketKey, Config, FlowCounters, FlowKey};
-use limits::{Direction, Slots, GLOBAL_DOWN, GLOBAL_UP, MAX_RATE};
+use limits::{Direction, GLOBAL_DOWN, GLOBAL_UP, MAX_RATE, Slots};
 use protocol::{Command, Connection, Event, Rates, Sample};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -57,7 +57,9 @@ fn load() -> Result<(Ebpf, Maps)> {
             .program_mut(name)
             .with_context(|| format!("missing program {name}"))?
             .try_into()?;
-        program.load().with_context(|| format!("verifying {name}"))?;
+        program
+            .load()
+            .with_context(|| format!("verifying {name}"))?;
         // aya attaches with a bpf_link (Linux 5.7+), which the kernel always
         // adds alongside other programs, such as systemd's; it rejects an
         // explicit multi-attach flag.
@@ -199,7 +201,14 @@ impl Helper {
             fq: None,
         };
         helper.rescan();
-        helper.maps.config.set(0, &Config { ifindex: 0, enabled: 1 }, 0)?;
+        helper.maps.config.set(
+            0,
+            &Config {
+                ifindex: 0,
+                enabled: 1,
+            },
+            0,
+        )?;
         Ok(helper)
     }
 
@@ -232,7 +241,11 @@ impl Helper {
             }
         }
         for ((cgroup, direction), slot) in wanted {
-            let key = BucketKey { cgroup, direction, pad: 0 };
+            let key = BucketKey {
+                cgroup,
+                direction,
+                pad: 0,
+            };
             let _ = self.maps.cgroup_buckets.insert(&key, &slot, 0);
         }
     }
@@ -242,7 +255,12 @@ impl Helper {
             Some(rate) => {
                 let rate = rate.clamp(1, MAX_RATE);
                 let burst = limits::burst(rate);
-                Bucket { tokens: burst as i64, last_ns: 0, rate, burst }
+                Bucket {
+                    tokens: burst as i64,
+                    last_ns: 0,
+                    rate,
+                    burst,
+                }
             }
             None => Bucket::default(),
         };
@@ -253,11 +271,23 @@ impl Helper {
     /// Remove every limit, e.g. when the last client leaves.
     /// Also restores the interface's queueing discipline.
     fn clear_limits(&mut self) {
-        let apps: Vec<String> = self.slots.iter().map(|(app, _, _)| app.to_string()).collect();
+        let apps: Vec<String> = self
+            .slots
+            .iter()
+            .map(|(app, _, _)| app.to_string())
+            .collect();
         for app in apps {
-            let _ = self.command(Command::Limit { app: Some(app), down: None, up: None });
+            let _ = self.command(Command::Limit {
+                app: Some(app),
+                down: None,
+                up: None,
+            });
         }
-        let _ = self.command(Command::Limit { app: None, down: None, up: None });
+        let _ = self.command(Command::Limit {
+            app: None,
+            down: None,
+            up: None,
+        });
     }
 
     /// Apply a command; returns false when the helper should stop.
@@ -266,20 +296,33 @@ impl Helper {
             Command::Stop => return Ok(false),
             Command::Interface { name } => {
                 let index = ifindex(&name)?;
-                self.maps
-                    .config
-                    .set(0, &Config { ifindex: index, enabled: 1 }, 0)?;
+                self.maps.config.set(
+                    0,
+                    &Config {
+                        ifindex: index,
+                        enabled: 1,
+                    },
+                    0,
+                )?;
                 self.iface_totals = interface_totals(Some(&name));
                 self.interface = Some(name);
                 self.sync_qdisc();
             }
-            Command::Limit { app: None, down, up } => {
+            Command::Limit {
+                app: None,
+                down,
+                up,
+            } => {
                 self.set_bucket(GLOBAL_DOWN, down)?;
                 self.set_bucket(GLOBAL_UP, up)?;
                 self.global_up = up.is_some();
                 self.sync_qdisc();
             }
-            Command::Limit { app: Some(app), down, up } => {
+            Command::Limit {
+                app: Some(app),
+                down,
+                up,
+            } => {
                 for (direction, rate) in [(Direction::Down, down), (Direction::Up, up)] {
                     match rate {
                         Some(rate) => {
@@ -354,8 +397,14 @@ impl Helper {
             if rates.rx == 0 && rates.tx == 0 {
                 continue;
             }
-            let Some(info) = self.cgroups.get(cgroup) else { continue };
-            let id = self.ids.get(cgroup).cloned().unwrap_or_else(|| info.unit.id.clone());
+            let Some(info) = self.cgroups.get(cgroup) else {
+                continue;
+            };
+            let id = self
+                .ids
+                .get(cgroup)
+                .cloned()
+                .unwrap_or_else(|| info.unit.id.clone());
             let app = apps.entry(id.clone()).or_insert_with(|| protocol::App {
                 id: id.clone(),
                 kind: info.unit.kind.clone(),
@@ -415,7 +464,12 @@ impl Helper {
         let mut apps: Vec<protocol::App> = apps.into_values().collect();
         apps.sort_by_key(|a| std::cmp::Reverse(a.rates.rx + a.rates.tx));
         connections.sort_by_key(|c| std::cmp::Reverse(c.rates.rx + c.rates.tx));
-        Sample { interface: self.interface.clone(), total, apps, connections }
+        Sample {
+            interface: self.interface.clone(),
+            total,
+            apps,
+            connections,
+        }
     }
 }
 
@@ -444,7 +498,9 @@ fn run() -> Result<()> {
         let _ = commands.send(r#"{"cmd":"stop"}"#.into());
     });
 
-    emit(&Event::Ready { version: env!("CARGO_PKG_VERSION").into() });
+    emit(&Event::Ready {
+        version: env!("CARGO_PKG_VERSION").into(),
+    });
     let mut next = Instant::now() + Duration::from_secs(1);
     loop {
         let wait = next.saturating_duration_since(Instant::now());
@@ -454,9 +510,13 @@ fn run() -> Result<()> {
                 Ok(command) => match helper.command(command) {
                     Ok(true) => {}
                     Ok(false) => break,
-                    Err(error) => emit(&Event::Error { message: format!("{error:#}") }),
+                    Err(error) => emit(&Event::Error {
+                        message: format!("{error:#}"),
+                    }),
                 },
-                Err(error) => emit(&Event::Error { message: format!("bad command: {error}") }),
+                Err(error) => emit(&Event::Error {
+                    message: format!("bad command: {error}"),
+                }),
             },
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 emit(&Event::Sample(helper.sample()));
@@ -498,7 +558,9 @@ fn main() {
         run()
     };
     if let Err(error) = result {
-        emit(&Event::Error { message: format!("{error:#}") });
+        emit(&Event::Error {
+            message: format!("{error:#}"),
+        });
         std::process::exit(1);
     }
 }
@@ -531,7 +593,12 @@ mod tests {
             for insn in &function.instructions {
                 if insn.code == BPF_STX_ATOMIC_DW {
                     atomics += 1;
-                    assert_ne!(insn.imm & BPF_FETCH, 0, "{} has a plain atomic add", function.name);
+                    assert_ne!(
+                        insn.imm & BPF_FETCH,
+                        0,
+                        "{} has a plain atomic add",
+                        function.name
+                    );
                 }
             }
         }
@@ -540,11 +607,18 @@ mod tests {
 
     #[test]
     fn remote_addresses_by_family() {
-        let mut key = FlowKey { family: 2, ..Default::default() };
+        let mut key = FlowKey {
+            family: 2,
+            ..Default::default()
+        };
         key.remote[..4].copy_from_slice(&[93, 184, 216, 34]);
         assert_eq!(remote_address(&key).to_string(), "93.184.216.34");
         let v6: Ipv6Addr = "2606:2800:220:1::1".parse().unwrap();
-        let key = FlowKey { family: 10, remote: v6.octets(), ..Default::default() };
+        let key = FlowKey {
+            family: 10,
+            remote: v6.octets(),
+            ..Default::default()
+        };
         assert_eq!(remote_address(&key).to_string(), "2606:2800:220:1::1");
     }
 

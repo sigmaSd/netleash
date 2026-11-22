@@ -20,7 +20,7 @@
 
 use aya_ebpf::{
     EbpfContext,
-    bindings::{BPF_NOEXIST, __sk_buff},
+    bindings::{__sk_buff, BPF_NOEXIST},
     helpers::{bpf_ktime_get_ns, generated::bpf_skb_cgroup_id},
     macros::{cgroup_skb, map},
     maps::{Array, HashMap, LruHashMap, PerCpuHashMap},
@@ -143,7 +143,11 @@ fn take(index: u32, len: u32, now: u64) -> bool {
 /// The cgroup's bucket slot in one direction, if it has a limit.
 #[inline(always)]
 fn bucket_of(cgroup: u64, direction: u32) -> Option<u32> {
-    let key = BucketKey { cgroup, direction, pad: 0 };
+    let key = BucketKey {
+        cgroup,
+        direction,
+        pad: 0,
+    };
     // SAFETY: the value is copied out immediately.
     unsafe { CGROUP_BUCKETS.get(&key) }
         .copied()
@@ -223,7 +227,11 @@ fn parse(ctx: &SkBuffContext, protocol: u16, direction: u32, key: &mut FlowKey) 
         };
         key.family = AF_INET;
         key.protocol = ip[9];
-        let remote = if up { [ip[16], ip[17], ip[18], ip[19]] } else { [ip[12], ip[13], ip[14], ip[15]] };
+        let remote = if up {
+            [ip[16], ip[17], ip[18], ip[19]]
+        } else {
+            [ip[12], ip[13], ip[14], ip[15]]
+        };
         key.remote[0] = remote[0];
         key.remote[1] = remote[1];
         key.remote[2] = remote[2];
@@ -311,7 +319,10 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
         }
     }
 
-    let mut key = FlowKey { cgroup, ..FlowKey::default() };
+    let mut key = FlowKey {
+        cgroup,
+        ..FlowKey::default()
+    };
     if parse(ctx, protocol, direction, &mut key) {
         let flow = match FLOWS.get_ptr_mut(&key) {
             Some(flow) => Some(flow),

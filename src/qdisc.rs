@@ -45,9 +45,18 @@ mod tests {
 
     #[test]
     fn reads_the_kind() {
-        assert_eq!(kind("qdisc fq_codel 0: root refcnt 2 limit 10240p").as_deref(), Some("fq_codel"));
-        assert_eq!(kind("qdisc fq 8001: root refcnt 2 limit 10000p").as_deref(), Some("fq"));
-        assert_eq!(kind("qdisc noqueue 0: root refcnt 2").as_deref(), Some("noqueue"));
+        assert_eq!(
+            kind("qdisc fq_codel 0: root refcnt 2 limit 10240p").as_deref(),
+            Some("fq_codel")
+        );
+        assert_eq!(
+            kind("qdisc fq 8001: root refcnt 2 limit 10000p").as_deref(),
+            Some("fq")
+        );
+        assert_eq!(
+            kind("qdisc noqueue 0: root refcnt 2").as_deref(),
+            Some("noqueue")
+        );
         assert_eq!(kind(""), None);
     }
 }

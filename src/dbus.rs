@@ -13,12 +13,18 @@
 //! stdin lines to `Command` and prints `Sample` signals, so Bandito talks to
 //! it exactly as it talks to the helper run through pkexec, without a
 //! password at every start.
+//!
+//! zbus is async; this program has no runtime of its own, so it drives zbus
+//! with `zbus::block_on`. A connection is built in one call, after which
+//! zbus's helper thread keeps it running, and each thread makes its own short
+//! `block_on` calls on it. Nothing blocks inside those futures.
 
 use crate::{
     Helper, emit, load,
     protocol::{Command, Event},
 };
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead},
@@ -26,12 +32,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use zbus::{
-    blocking,
-    fdo,
-    message::Header,
-    zvariant::Value,
-};
+use zbus::{Connection, Proxy, Variant, connection, fdo, message::Header};
 
 pub const BUS_NAME: &str = "io.github.sigmasd.Bandito.Helper";
 pub const PATH: &str = "/io/github/sigmasd/Bandito/Helper";
@@ -57,8 +58,8 @@ struct Service {
 
 /// Ask polkit whether a bus client may change Bandito's settings, letting
 /// polkit ask the user to authenticate when its policy says so.
-async fn authorized(connection: &zbus::Connection, sender: &str) -> fdo::Result<bool> {
-    let authority = zbus::Proxy::new(
+async fn authorized(connection: &Connection, sender: &str) -> fdo::Result<bool> {
+    let authority = Proxy::new(
         connection,
         "org.freedesktop.PolicyKit1",
         "/org/freedesktop/PolicyKit1/Authority",
@@ -67,7 +68,7 @@ async fn authorized(connection: &zbus::Connection, sender: &str) -> fdo::Result<
     .await?;
     let subject = (
         "system-bus-name",
-        HashMap::from([("name", Value::from(sender))]),
+        HashMap::from([("name", Variant::from(sender))]),
     );
     const ALLOW_USER_INTERACTION: u32 = 1;
     let (allowed, _challenge, _details): (bool, bool, HashMap<String, String>) = authority
@@ -91,7 +92,7 @@ impl Service {
     async fn command(
         &self,
         #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
+        #[zbus(connection)] connection: &Connection,
         json: String,
     ) -> fdo::Result<()> {
         let sender = header
@@ -123,8 +124,8 @@ impl Service {
 
     /// The helper's version.
     #[zbus(property)]
-    fn version(&self) -> &str {
-        env!("CARGO_PKG_VERSION")
+    fn version(&self) -> String {
+        env!("CARGO_PKG_VERSION").into()
     }
 }
 
@@ -136,32 +137,41 @@ pub fn serve(polkit: bool) -> Result<()> {
         empty_since: Some(Instant::now()),
         ..Clients::default()
     }));
-    let service = Service { helper: Arc::clone(&helper), clients: Arc::clone(&clients), polkit };
-    let connection = blocking::connection::Builder::system()?
-        .name(BUS_NAME)?
-        .serve_at(PATH, service)?
-        .build()
-        .context("taking the bus name")?;
+    let service = Service {
+        helper: Arc::clone(&helper),
+        clients: Arc::clone(&clients),
+        polkit,
+    };
+    let connection = zbus::block_on(
+        connection::Builder::system()
+            .name(BUS_NAME)
+            .serve_at(PATH, service)
+            .build(),
+    )
+    .context("taking the bus name")?;
 
     // Drop a client's limits when it leaves the bus.
     {
         let connection = connection.clone();
         let helper = Arc::clone(&helper);
         let clients = Arc::clone(&clients);
-        thread::spawn(move || -> Result<()> {
-            let bus = blocking::fdo::DBusProxy::new(&connection)?;
-            for change in bus.receive_name_owner_changed()? {
-                let args = change.args()?;
-                if args.new_owner().is_some() {
-                    continue;
+        thread::spawn(move || {
+            zbus::block_on(async {
+                let bus = fdo::DBusProxy::new(&connection).await?;
+                let mut changes = bus.receive_name_owner_changed().await?;
+                while let Some(change) = changes.next().await {
+                    let args = change.args()?;
+                    if args.new_owner().is_some() {
+                        continue;
+                    }
+                    let mut clients = clients.lock().unwrap();
+                    if clients.names.remove(args.name().as_str()) && clients.names.is_empty() {
+                        clients.empty_since = Some(Instant::now());
+                        helper.lock().unwrap().clear_limits();
+                    }
                 }
-                let mut clients = clients.lock().unwrap();
-                if clients.names.remove(args.name().as_str()) && clients.names.is_empty() {
-                    clients.empty_since = Some(Instant::now());
-                    helper.lock().unwrap().clear_limits();
-                }
-            }
-            Ok(())
+                zbus::Result::Ok(())
+            })
         });
     }
 
@@ -169,7 +179,7 @@ pub fn serve(polkit: bool) -> Result<()> {
         thread::sleep(Duration::from_secs(1));
         let sample = helper.lock().unwrap().sample();
         let json = serde_json::to_string(&Event::Sample(sample))?;
-        connection.emit_signal(None::<()>, PATH, INTERFACE, "Sample", &(json,))?;
+        zbus::block_on(connection.emit_signal(None::<()>, PATH, INTERFACE, "Sample", &(json,)))?;
         if clients
             .lock()
             .unwrap()
@@ -184,41 +194,48 @@ pub fn serve(polkit: bool) -> Result<()> {
 
 /// Bridge stdin/stdout to the service, as the user.
 pub fn client() -> Result<()> {
-    let connection = blocking::Connection::system().context("connecting to the system bus")?;
-    let proxy = blocking::Proxy::new(&connection, BUS_NAME, PATH, INTERFACE)?;
-    // Starts the service through D-Bus activation if it isn't running.
-    let version: String = proxy
-        .get_property("Version")
-        .context("reaching bandito-helper's service; is it installed?")?;
-    let samples = proxy.receive_signal("Sample")?;
+    zbus::block_on(async {
+        let connection = Connection::system()
+            .await
+            .context("connecting to the system bus")?;
+        let proxy = Proxy::new(&connection, BUS_NAME, PATH, INTERFACE).await?;
+        // Starts the service through D-Bus activation if it isn't running.
+        let version: String = proxy
+            .get_property("Version")
+            .await
+            .context("reaching bandito-helper's service; is it installed?")?;
+        let mut samples = proxy.receive_signal("Sample").await?;
 
-    let commands = proxy.clone();
-    thread::spawn(move || {
-        for line in io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
+        // Reading stdin blocks, so it gets a thread of its own, which makes
+        // its own short block_on call per command.
+        let commands = proxy.clone();
+        thread::spawn(move || {
+            for line in io::stdin().lock().lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if line.contains(r#""stop""#) {
+                    break;
+                }
+                if let Err(error) = zbus::block_on(commands.call_method("Command", &(line,))) {
+                    let message = match error {
+                        zbus::Error::MethodError(_, Some(message), _) => message,
+                        other => other.to_string(),
+                    };
+                    emit(&Event::Error { message });
+                }
             }
-            if line.contains(r#""stop""#) {
-                break;
-            }
-            if let Err(error) = commands.call_method("Command", &(line,)) {
-                let message = match error {
-                    zbus::Error::MethodError(_, Some(message), _) => message,
-                    other => other.to_string(),
-                };
-                emit(&Event::Error { message });
-            }
+            emit(&Event::Stopped);
+            // Leaving the bus makes the service drop this client's limits.
+            std::process::exit(0);
+        });
+
+        emit(&Event::Ready { version });
+        while let Some(signal) = samples.next().await {
+            let (json,): (String,) = signal.body().deserialize()?;
+            println!("{json}");
         }
-        emit(&Event::Stopped);
-        // Leaving the bus makes the service drop this client's limits.
-        std::process::exit(0);
-    });
-
-    emit(&Event::Ready { version });
-    for signal in samples {
-        let (json,): (String,) = signal.body().deserialize()?;
-        println!("{json}");
-    }
-    Ok(())
+        Ok(())
+    })
 }
