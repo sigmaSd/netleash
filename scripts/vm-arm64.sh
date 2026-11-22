@@ -13,7 +13,9 @@
 #
 #   ARM64_ROOT=path/to/arm64-root scripts/vm-arm64.sh
 #
-# QEMU picks another qemu-system-aarch64. The test itself is vm-arm64-init.sh.
+# QEMU picks another qemu-system-aarch64. HELPER tests that binary instead of
+# building one, such as a downloaded netleash-aarch64. The test itself is
+# vm-arm64-init.sh.
 
 set -eu
 cd "$(dirname "$0")/.."
@@ -27,8 +29,12 @@ for file in "$kernel" "$modules/kernel/drivers/net/veth.ko.xz" "$busybox"; do
   [ -f "$file" ] || { echo "missing $file" >&2; exit 1; }
 done
 
-cargo build --release --target aarch64-unknown-linux-musl
-helper=${CARGO_TARGET_DIR:-target}/aarch64-unknown-linux-musl/release/netleash
+if [ -n "${HELPER:-}" ]; then
+  helper=$HELPER
+else
+  cargo build --release --target aarch64-unknown-linux-musl
+  helper=${CARGO_TARGET_DIR:-target}/aarch64-unknown-linux-musl/release/netleash
+fi
 
 # An initramfs with busybox as init, the veth module and netleash.
 out=vm-test-out/arm64
