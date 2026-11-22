@@ -1,5 +1,5 @@
 #!/bin/sh
-# Live test of bandito-helper as root, inside a throwaway VM running the host
+# Live test of netleash as root, inside a throwaway VM running the host
 # kernel (no sudo needed on the host). Run from the repository root:
 #
 #   scripts/vm.sh
@@ -9,7 +9,7 @@
 # reports and how its limits hold.
 
 set -eu
-HELPER=${HELPER:-target/release/bandito-helper}
+HELPER=${HELPER:-target/release/netleash}
 OUT=${OUT:-vm-test-out}
 mkdir -p "$OUT"
 rm -f "$OUT"/*

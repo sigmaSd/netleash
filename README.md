@@ -1,9 +1,63 @@
-# bandito-helper
+# netleash
 
-Measures and limits network traffic per app with eBPF, for
-[Bandito](https://github.com/sigmaSd/bandito-gtk). One root helper replaces the
-two Bandito used before: `bandwhich` for measuring and `eltrafico-tc` for
-limiting.
+See and limit network traffic per app on Linux, with eBPF.
+
+netleash counts every app's download and upload, and each of its connections,
+as the kernel sends and receives them. It caps any app, or all of them
+together, in either direction, over IPv4 and IPv6. It runs as a small system
+service that apps talk to over D-Bus. [Bandito](https://github.com/sigmaSd/bandito-gtk)
+is a GTK front end for it; anything that speaks its JSON protocol can be one.
+
+- Apps are named by their application ID (`org.mozilla.firefox`), from the
+  systemd scope desktops start them in, so front ends can show the right name
+  and icon.
+- Upload limits are paced, not dropped: TCP doesn't retransmit.
+- Nothing is left behind: everything detaches when netleash exits, however it
+  exits.
+
+It needs Linux 5.12 or later with cgroup v2, which any current distribution has.
+
+## Install
+
+From crates.io (the eBPF programs come precompiled, so stable Rust is enough):
+
+```sh
+cargo install netleash
+sudo ~/.cargo/bin/netleash --install
+```
+
+Or download `netleash` from the
+[latest release](https://github.com/sigmaSd/netleash/releases/latest), then run
+`chmod +x netleash` and `sudo ./netleash --install`.
+
+`--install` copies the binary to `/usr/bin/netleash` and adds:
+
+- a D-Bus policy: only root may run the service, anyone may call it;
+- a D-Bus activation file and a systemd unit, so the service starts on demand;
+- a polkit action, `io.github.sigmasd.Netleash.configure`. The user at the
+  computer may change limits without a password, like network settings;
+  others must authenticate as an administrator.
+
+`sudo netleash --uninstall` removes them again. Both take `--prefix DIR`
+(default `/usr`). Packagers can use `scripts/install.sh`, which honours
+`DESTDIR` and `PREFIX`.
+
+## Use
+
+As your user, `netleash --client` connects to the service, starting it if
+needed, and speaks the [protocol](#protocol) on stdin and stdout:
+
+```console
+$ netleash --client
+{"type":"ready","version":"0.1.0"}
+{"cmd":"interface","name":"wlan0"}
+{"type":"sample","interface":"wlan0","total":{"rx":3200000,"tx":410000},"apps":[...],"connections":[...]}
+{"cmd":"limit","app":"org.mozilla.firefox","down":2500000,"up":null}
+```
+
+When the client exits, the limits it set are removed.
+
+Bandito uses netleash automatically when the service is installed.
 
 ## How it works
 
@@ -18,7 +72,7 @@ so the cgroup names the app.
   IPv4 and IPv6, on the chosen interface only.
 - **Limiting:** a limit per app and direction, plus a global one.
   - Uploads are paced: each packet gets a departure time (EDT), and the `fq`
-    queueing discipline, which the helper puts on the interface while an
+    queueing discipline, which netleash puts on the interface while an
     upload limit is set, sends it then. Nothing is dropped and TCP doesn't
     retransmit. Without `fq`, packets more than half a second ahead are
     dropped instead.
@@ -31,26 +85,21 @@ so the cgroup names the app.
 - **Unidentified traffic:** traffic no local socket owns (forwarded packets,
   ICMP, the kernel's own) is the interface total minus the apps.
 
-Compared with the previous helpers:
-
-- IPv6 is limited too.
-- Traffic is attributed per packet in the kernel, not by polling `ss` or
-  `/proc`.
-- Apps are named by their application ID instead of a 15-character process
-  name.
-- Nothing is left behind: the programs are held by `bpf_link` file
-  descriptors and detach when the helper exits, however it exits.
+Compared with tools that poll `ss` or walk `/proc` (as `bandwhich` and
+`eltrafico` do), traffic is attributed per packet in the kernel, IPv6 is
+limited too, and the programs are held by `bpf_link` file descriptors, so they
+detach when netleash exits, however it exits.
 
 ## Layout
 
 - `ebpf/`: the eBPF programs (`no_std`, BPF target).
 - `common/`: the map keys and values both sides use, defined once.
-- `src/`: the userspace helper.
+- `src/`: the userspace program.
 
-## Build
+## Building from source
 
-The helper builds with Rust 1.98 (pinned in `rust-toolchain.toml`). The eBPF
-programs need, once:
+netleash builds with stable Rust (pinned in `rust-toolchain.toml`). Building the
+eBPF programs from source needs, once:
 
 ```sh
 rustup toolchain install nightly-2026-11-21 --component rust-src
@@ -75,7 +124,8 @@ cargo build --release
 
 ## Protocol
 
-The helper runs as root and speaks JSON lines.
+Run as root (`sudo netleash`, as a front end does through `pkexec`), or through
+the service with `netleash --client`, netleash speaks JSON lines.
 
 Commands, one per line on stdin:
 
@@ -88,7 +138,8 @@ Commands, one per line on stdin:
 
 - `app` is an ID from the samples. `null` limits all apps together.
 - Rates are bytes per second. `null` removes that limit.
-- Closing stdin stops the helper.
+- Closing stdin stops netleash (or, with `--client`, removes the client's
+  limits).
 
 Events, one per line on stdout:
 
@@ -109,29 +160,13 @@ Events, one per line on stdout:
 - A sample is sent once a second.
 - `kind` is `app`, `service` or `other`.
 
-## Installing as a system service
-
-```sh
-cargo build --release
-sudo scripts/install.sh
-```
-
-This installs the helper as `/usr/libexec/bandito-helper` with:
-
-- a D-Bus policy: only root may run the service, anyone may call it;
-- a D-Bus activation file and a systemd unit, so the service starts on demand;
-- a polkit action, `io.github.sigmasd.Bandito.Helper.configure`. The user at
-  the computer may change settings without a password, like network settings;
-  others must authenticate as an administrator.
-
-Bandito then uses it automatically, without `pkexec` and without a password
-prompt at every start. `DESTDIR` and `PREFIX` work as usual for packaging.
+## D-Bus service
 
 How the pieces talk:
 
-- **Service:** `bandito-helper --dbus` owns `io.github.sigmasd.Bandito.Helper`
-  on the system bus, at `/io/github/sigmasd/Bandito/Helper`.
-- **Interface `io.github.sigmasd.Bandito.Helper1`:**
+- **Service:** `netleash --dbus` owns `io.github.sigmasd.Netleash`
+  on the system bus, at `/io/github/sigmasd/Netleash`.
+- **Interface `io.github.sigmasd.Netleash1`:**
   - method `Command(s json)` takes the protocol commands below; polkit checks
     the caller first;
   - signal `Sample(s json)` sends a `sample` event once a second;
@@ -139,9 +174,8 @@ How the pieces talk:
 - **When clients leave:** if the last client that sent a command leaves the
   bus, its limits are removed. After a minute with no clients the service
   exits, and D-Bus starts it again when needed.
-- **Client:** `bandito-helper --client` runs as the user and bridges stdin and
-  stdout to the service. Bandito speaks the same JSON lines to it as to the
-  helper run through `pkexec`.
+- **Client:** `netleash --client` runs as the user and bridges stdin and
+  stdout to the service, so a front end speaks the same JSON lines either way.
 
 ## Testing as root without sudo
 
@@ -153,7 +187,7 @@ How the pieces talk:
 - runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
 - checks attribution, per-app and global limits in both directions, upload
   pacing through `fq` without retransmissions, limits without `fq`, error
-  reporting, and that nothing stays attached after the helper exits.
+  reporting, and that nothing stays attached after netleash exits.
 
 `scripts/vm-dbus-test.sh` runs in a second VM. It starts a private system bus
 with `dist/`'s policy and checks that:
@@ -162,7 +196,8 @@ with `dist/`'s policy and checks that:
   answer;
 - the unprivileged `nobody` user can set limits through the client and
   receive samples;
-- a client's limits go away when it leaves.
+- a client's limits go away when it leaves;
+- `--install` and `--uninstall` write and remove the service files.
 
 It needs `/dev/kvm`, QEMU, `uv tool install virtme-ng`, and a static busybox.
 On Fedora you can extract one without installing it:
@@ -172,13 +207,14 @@ dnf download busybox && rpm2cpio busybox-*.x86_64.rpm | cpio -idm ./usr/bin/busy
 BUSYBOX=$PWD/usr/bin/busybox scripts/vm.sh
 ```
 
-To try the helper on your own machine with Bandito:
+To try a build with Bandito without installing it, run Bandito with
+`BANDITO_BACKEND=ebpf NETLEASH=target/release/netleash`; it then runs that
+binary through `pkexec`.
 
-```sh
-BANDITO_BACKEND=ebpf BANDITO_HELPER=target/release/bandito-helper deno run -A src/main.ts
-```
+To publish, `scripts/publish.sh` builds the eBPF object, which the crate ships
+instead of `ebpf/`, and publishes `netleash-common` and `netleash`.
 
-## Not done yet
+## Limitations
 
 - The systemd unit and the real polkit daemon haven't been tested: the VM has
   neither. The test bus loads the same D-Bus policy, and the service fails

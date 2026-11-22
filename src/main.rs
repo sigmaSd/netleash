@@ -1,4 +1,4 @@
-//! bandito-helper: measures and limits network traffic per app with eBPF.
+//! netleash: measures and limits network traffic per app with eBPF.
 //!
 //! Runs as root, attaches the two cgroup_skb programs in `ebpf/` to the
 //! root cgroup, and
@@ -9,6 +9,7 @@
 mod apps;
 mod dbus;
 mod dns;
+mod install;
 mod limits;
 mod protocol;
 mod qdisc;
@@ -20,8 +21,8 @@ use aya::{
     maps::{Array, HashMap as BpfHashMap, MapData, PerCpuHashMap},
     programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
 };
-use bandito_helper_common::{AppCounters, Bucket, BucketKey, Config, FlowCounters, FlowKey};
 use limits::{Direction, GLOBAL_DOWN, GLOBAL_UP, MAX_RATE, Slots};
+use netleash_common::{AppCounters, Bucket, BucketKey, Config, FlowCounters, FlowKey};
 use protocol::{Command, Connection, Event, Rates, Sample};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -34,7 +35,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/bandito"));
+static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/netleash.bpf.o"));
 
 struct Maps {
     config: Array<MapData, Config>,
@@ -50,8 +51,8 @@ fn load() -> Result<(Ebpf, Maps)> {
     let mut bpf = Ebpf::load(OBJECT).context("loading the eBPF object")?;
     let root = fs::File::open(CGROUP_ROOT).context("opening the root cgroup")?;
     for (name, attach) in [
-        ("bandito_ingress", CgroupSkbAttachType::Ingress),
-        ("bandito_egress", CgroupSkbAttachType::Egress),
+        ("netleash_ingress", CgroupSkbAttachType::Ingress),
+        ("netleash_egress", CgroupSkbAttachType::Egress),
     ] {
         let program: &mut CgroupSkb = bpf
             .program_mut(name)
@@ -123,7 +124,7 @@ fn ifindex(name: &str) -> Result<u32> {
 }
 
 fn remote_address(key: &FlowKey) -> IpAddr {
-    if key.family == bandito_helper_common::AF_INET6 {
+    if key.family == netleash_common::AF_INET6 {
         IpAddr::V6(Ipv6Addr::from(key.remote))
     } else {
         IpAddr::V4(Ipv4Addr::new(
@@ -481,7 +482,7 @@ impl Drop for Helper {
     }
 }
 
-/// Run as a child of Bandito (through pkexec), on stdin/stdout.
+/// Run as a root child of a front end (through pkexec), on stdin/stdout.
 fn run() -> Result<()> {
     let (_bpf, maps) = load()?;
     let mut helper = Helper::new(maps)?;
@@ -534,20 +535,45 @@ fn run() -> Result<()> {
 }
 
 const USAGE: &str = "\
-bandito-helper: measures and limits traffic per app with eBPF.
+netleash: see and limit network traffic per app, with eBPF.
 
-  bandito-helper            run as root, speaking JSON lines on stdin/stdout
-  bandito-helper --dbus     run as the system D-Bus service (as root)
-  bandito-helper --client   bridge stdin/stdout to the service (as the user)
+  netleash                 run as root, speaking JSON lines on stdin/stdout
+  netleash --dbus          run as the system D-Bus service (as root)
+  netleash --client        bridge stdin/stdout to the service (as the user)
+  netleash --install       install this binary and the service (as root)
+  netleash --uninstall     remove them again (as root)
+  netleash --version
 
+--install and --uninstall take --prefix DIR (default /usr).
 --dbus --insecure-no-polkit skips authorization; only for tests.
-See README.md for the protocol.";
+See https://github.com/sigmaSd/netleash for the protocol.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
     if has("-h") || has("--help") {
         println!("{USAGE}");
+        return;
+    }
+    if has("-V") || has("--version") {
+        println!("netleash {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let prefix = args
+        .iter()
+        .position(|a| a == "--prefix")
+        .and_then(|i| args.get(i + 1))
+        .map_or("/usr", String::as_str);
+    if has("--install") || has("--uninstall") {
+        let result = if has("--install") {
+            install::install(Path::new(prefix))
+        } else {
+            install::uninstall(Path::new(prefix))
+        };
+        if let Err(error) = result {
+            eprintln!("netleash: {error:#}");
+            std::process::exit(1);
+        }
         return;
     }
     let result = if has("--dbus") {
@@ -572,7 +598,7 @@ mod tests {
     #[test]
     fn the_object_has_both_programs_and_all_maps() {
         let object = aya_obj::Object::parse(OBJECT).expect("aya parses the object");
-        for program in ["bandito_ingress", "bandito_egress"] {
+        for program in ["netleash_ingress", "netleash_egress"] {
             assert!(object.programs.contains_key(program), "{program}");
         }
         for map in ["config", "app_stats", "flows", "cgroup_buckets", "buckets"] {

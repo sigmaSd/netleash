@@ -117,38 +117,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bandito-helper"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "aya",
- "aya-obj",
- "bandito-helper-common",
- "dns-lookup",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "zbus",
-]
-
-[[package]]
-name = "bandito-helper-common"
-version = "0.1.0"
-dependencies = [
- "aya",
-]
-
-[[package]]
-name = "bandito-helper-ebpf"
-version = "0.1.0"
-dependencies = [
- "aya-ebpf",
- "bandito-helper-common",
- "which",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -375,6 +343,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "netleash"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aya",
+ "aya-obj",
+ "dns-lookup",
+ "futures-util",
+ "libc",
+ "netleash-common",
+ "serde",
+ "serde_json",
+ "zbus",
+]
+
+[[package]]
+name = "netleash-common"
+version = "0.1.0"
+dependencies = [
+ "aya",
+]
+
+[[package]]
+name = "netleash-ebpf"
+version = "0.1.0"
+dependencies = [
+ "aya-ebpf",
+ "netleash-common",
+ "which",
 ]
 
 [[package]]

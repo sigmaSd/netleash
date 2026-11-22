@@ -1,19 +1,25 @@
 #!/bin/sh
-# Install bandito-helper as a system D-Bus service. Run as root:
+# Install netleash as a system D-Bus service, for packagers (DESTDIR and
+# PREFIX work as usual). On your own machine, `sudo netleash --install` does
+# the same from the binary alone.
 #   cargo build --release && sudo scripts/install.sh
-# DESTDIR and PREFIX work as usual for packaging.
 set -eu
 cd "$(dirname "$0")/.."
-BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release/bandito-helper}
+BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release/netleash}
 PREFIX=${PREFIX:-/usr}
 DEST=${DESTDIR:-}
-install -Dm755 "$BIN" "$DEST$PREFIX/libexec/bandito-helper"
-install -Dm644 dist/io.github.sigmasd.Bandito.Helper.conf "$DEST$PREFIX/share/dbus-1/system.d/io.github.sigmasd.Bandito.Helper.conf"
-install -Dm644 dist/io.github.sigmasd.Bandito.Helper.service "$DEST$PREFIX/share/dbus-1/system-services/io.github.sigmasd.Bandito.Helper.service"
-install -Dm644 dist/bandito-helper.service "$DEST$PREFIX/lib/systemd/system/bandito-helper.service"
-install -Dm644 dist/io.github.sigmasd.Bandito.Helper.policy "$DEST$PREFIX/share/polkit-1/actions/io.github.sigmasd.Bandito.Helper.policy"
+put() { # mode, source, target: with /usr/bin/netleash pointed at PREFIX
+  install -d "$(dirname "$DEST$PREFIX/$3")"
+  sed "s#/usr/bin/netleash#$PREFIX/bin/netleash#" "$2" > "$DEST$PREFIX/$3"
+  chmod "$1" "$DEST$PREFIX/$3"
+}
+install -Dm755 "$BIN" "$DEST$PREFIX/bin/netleash"
+put 644 dist/io.github.sigmasd.Netleash.conf share/dbus-1/system.d/io.github.sigmasd.Netleash.conf
+put 644 dist/io.github.sigmasd.Netleash.service share/dbus-1/system-services/io.github.sigmasd.Netleash.service
+put 644 dist/netleash.service lib/systemd/system/netleash.service
+put 644 dist/io.github.sigmasd.Netleash.policy share/polkit-1/actions/io.github.sigmasd.Netleash.policy
 if [ -z "$DEST" ]; then
   systemctl daemon-reload 2>/dev/null || true
   busctl call org.freedesktop.DBus / org.freedesktop.DBus ReloadConfig 2>/dev/null || true
 fi
-echo "Installed. Bandito uses it automatically from the next start."
+echo "Installed. Front ends such as Bandito use it from their next start."

@@ -2,12 +2,12 @@
 
 use std::collections::HashMap;
 
-pub use bandito_helper_common::{GLOBAL_DOWN, GLOBAL_UP, MAX_BUCKETS};
+pub use netleash_common::{GLOBAL_DOWN, GLOBAL_UP, MAX_BUCKETS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    Down = bandito_helper_common::DIR_DOWN as isize,
-    Up = bandito_helper_common::DIR_UP as isize,
+    Down = netleash_common::DIR_DOWN as isize,
+    Up = netleash_common::DIR_UP as isize,
 }
 
 /// The burst a rate allows: a quarter second of traffic, at least 32 KiB, so

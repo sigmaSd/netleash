@@ -10,7 +10,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 cargo build --release
-HELPER=${CARGO_TARGET_DIR:-target}/release/bandito-helper
+HELPER=${CARGO_TARGET_DIR:-target}/release/netleash
 mkdir -p vm-test-out
 status=0
 for test in ${1:-vm-test.sh vm-dbus-test.sh}; do

@@ -114,7 +114,7 @@ pub fn classify(name: &str) -> Unit {
     }
 }
 
-/// A cgroup Bandito reports traffic for.
+/// A cgroup netleash reports traffic for.
 #[derive(Debug, Clone)]
 pub struct Cgroup {
     pub path: PathBuf,

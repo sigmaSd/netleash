@@ -1,4 +1,4 @@
-//! Bandito's traffic counter and limiter, attached as cgroup_skb programs to
+//! netleash's traffic counter and limiter, attached as cgroup_skb programs to
 //! the root cgroup. Every packet a local socket sends or receives passes
 //! through here with the socket's cgroup id, which systemd makes one per app
 //! (`app-*.scope`) or service (`*.service`).
@@ -26,13 +26,13 @@ use aya_ebpf::{
     maps::{Array, HashMap, LruHashMap, PerCpuHashMap},
     programs::SkBuffContext,
 };
-use bandito_helper_common::{
-    AF_INET, AF_INET6, AppCounters, Bucket, BucketKey, Config, DIR_DOWN, DIR_UP, FlowCounters,
-    FlowKey, GLOBAL_DOWN, GLOBAL_UP, LOOPBACK_IFINDEX, MAX_BUCKETS,
-};
 use core::{
     intrinsics::{AtomicOrdering::SeqCst, atomic_cxchg, atomic_xadd},
     ptr::addr_of_mut,
+};
+use netleash_common::{
+    AF_INET, AF_INET6, AppCounters, Bucket, BucketKey, Config, DIR_DOWN, DIR_UP, FlowCounters,
+    FlowKey, GLOBAL_DOWN, GLOBAL_UP, LOOPBACK_IFINDEX, MAX_BUCKETS,
 };
 
 /// Atomically add to a value in a map and return what it held before.
@@ -89,12 +89,12 @@ static CGROUP_BUCKETS: HashMap<BucketKey, u32> = HashMap::with_max_entries(16384
 static BUCKETS: Array<Bucket> = Array::with_max_entries(MAX_BUCKETS, 0);
 
 #[cgroup_skb(ingress)]
-pub fn bandito_ingress(ctx: SkBuffContext) -> i32 {
+pub fn netleash_ingress(ctx: SkBuffContext) -> i32 {
     handle(&ctx, DIR_DOWN)
 }
 
 #[cgroup_skb(egress)]
-pub fn bandito_egress(ctx: SkBuffContext) -> i32 {
+pub fn netleash_egress(ctx: SkBuffContext) -> i32 {
     handle(&ctx, DIR_UP)
 }
 

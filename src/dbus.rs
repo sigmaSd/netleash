@@ -2,17 +2,17 @@
 //! bridges it to the JSON-lines protocol on stdin/stdout.
 //!
 //! The service runs as root (started by D-Bus activation through systemd)
-//! and owns `io.github.sigmasd.Bandito.Helper`. Its one method, `Command`,
+//! and owns `io.github.sigmasd.Netleash`. Its one method, `Command`,
 //! takes a protocol command as JSON; polkit decides whether the caller may
 //! run it. Once a second it emits the `Sample` signal with a protocol
 //! `sample` event as JSON. When the last client that sent a command leaves
 //! the bus, its limits are removed, and the service exits after a minute
 //! without clients (D-Bus starts it again on the next call).
 //!
-//! The client (`bandito-helper --client`) runs as the user: it forwards
-//! stdin lines to `Command` and prints `Sample` signals, so Bandito talks to
-//! it exactly as it talks to the helper run through pkexec, without a
-//! password at every start.
+//! The client (`netleash --client`) runs as the user: it forwards
+//! stdin lines to `Command` and prints `Sample` signals, so a front end such
+//! as Bandito talks to it exactly as to netleash run through pkexec, without
+//! a password at every start.
 //!
 //! zbus is async; this program has no runtime of its own, so it drives zbus
 //! with `zbus::block_on`. A connection is built in one call, after which
@@ -34,11 +34,11 @@ use std::{
 };
 use zbus::{Connection, Proxy, Variant, connection, fdo, message::Header};
 
-pub const BUS_NAME: &str = "io.github.sigmasd.Bandito.Helper";
-pub const PATH: &str = "/io/github/sigmasd/Bandito/Helper";
-pub const INTERFACE: &str = "io.github.sigmasd.Bandito.Helper1";
+pub const BUS_NAME: &str = "io.github.sigmasd.Netleash";
+pub const PATH: &str = "/io/github/sigmasd/Netleash";
+pub const INTERFACE: &str = "io.github.sigmasd.Netleash1";
 /// The polkit action that guards every command.
-pub const ACTION: &str = "io.github.sigmasd.Bandito.Helper.configure";
+pub const ACTION: &str = "io.github.sigmasd.Netleash.configure";
 /// How long the service waits without clients before it exits.
 const IDLE_EXIT: Duration = Duration::from_secs(60);
 
@@ -56,7 +56,7 @@ struct Service {
     polkit: bool,
 }
 
-/// Ask polkit whether a bus client may change Bandito's settings, letting
+/// Ask polkit whether a bus client may change network limits, letting
 /// polkit ask the user to authenticate when its policy says so.
 async fn authorized(connection: &Connection, sender: &str) -> fdo::Result<bool> {
     let authority = Proxy::new(
@@ -86,7 +86,7 @@ async fn authorized(connection: &Connection, sender: &str) -> fdo::Result<bool> 
     Ok(allowed)
 }
 
-#[zbus::interface(name = "io.github.sigmasd.Bandito.Helper1")]
+#[zbus::interface(name = "io.github.sigmasd.Netleash1")]
 impl Service {
     /// Run one protocol command, given as JSON: `interface` or `limit`.
     async fn command(
@@ -106,7 +106,7 @@ impl Service {
         }
         if self.polkit && !authorized(connection, &sender).await? {
             return Err(fdo::Error::AccessDenied(
-                "not authorized to change Bandito's network settings".into(),
+                "not authorized to change network limits".into(),
             ));
         }
         {
@@ -203,7 +203,7 @@ pub fn client() -> Result<()> {
         let version: String = proxy
             .get_property("Version")
             .await
-            .context("reaching bandito-helper's service; is it installed?")?;
+            .context("reaching netleash's service; install it with `sudo netleash --install`")?;
         let mut samples = proxy.receive_signal("Sample").await?;
 
         // Reading stdin blocks, so it gets a thread of its own, which makes

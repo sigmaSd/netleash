@@ -1,7 +1,11 @@
 [package]
-name = "bandito-helper-common"
+name = "netleash-common"
 version = "0.1.0"
 edition = "2024"
+description = "Map types shared by netleash's eBPF programs and its userspace"
+license = "MIT"
+repository = "https://github.com/sigmaSd/netleash"
+keywords = ["ebpf", "netleash"]
 
 [features]
 default = []

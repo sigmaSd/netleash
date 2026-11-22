@@ -1,15 +1,18 @@
 [package]
-name = "bandito-helper-ebpf"
+name = "netleash-ebpf"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+# Built into netleash by its build.rs; never published.
+publish = false
 
 [dependencies]
 aya-ebpf = "0.3"
-bandito-helper-common = { path = "../common" }
+netleash-common = { path = "../common" }
 
 [build-dependencies]
 which = { version = "8", default-features = false, features = ["real-sys"] }
 
 [[bin]]
-name = "bandito"
+name = "netleash"
 path = "src/main.rs"

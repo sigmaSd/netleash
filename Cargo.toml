@@ -1,7 +1,25 @@
 [package]
-name = "bandito-helper"
+name = "netleash"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.98"
+description = "See and limit network traffic per app on Linux, with eBPF"
+license = "MIT"
+repository = "https://github.com/sigmaSd/netleash"
+readme = "README.md"
+keywords = ["ebpf", "bandwidth", "network", "traffic-shaping", "linux"]
+categories = ["command-line-utilities", "network-programming", "os::linux-apis"]
+# The eBPF sources stay out: the package ships their compiled object
+# (scripts/publish.sh builds it), so installing needs no nightly Rust.
+include = [
+  "/src",
+  "/build.rs",
+  "/netleash.bpf.o",
+  "/dist",
+  "/scripts/install.sh",
+  "/README.md",
+  "/LICENSE",
+]
 
 [workspace]
 members = ["common", "ebpf"]
@@ -11,7 +29,7 @@ default-members = [".", "common"]
 [dependencies]
 anyhow = "1.0.104"
 aya = "0.16"
-bandito-helper-common = { path = "common", features = ["user"] }
+netleash-common = { version = "0.1.0", path = "common", features = ["user"] }
 dns-lookup = "4.0.2"
 libc = "0.2.191"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -21,7 +39,3 @@ futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 aya-obj = "0.6"
-
-[profile.release.package.bandito-helper-ebpf]
-debug = 2
-codegen-units = 1
