@@ -36,6 +36,8 @@ send '{"cmd":"interface","name":"veth0"}'
 R=$(traffic "$APP_A" down 10.9.0.2 100000000)
 sleep 2
 check "traffic is attributed to the app" "grep -q '\"id\":\"org.example.Fetcher\"' /run/out.jsonl"
+check "and to its process" "grep -q '\"processTraffic\":\[{\"pid\":' /run/out.jsonl"
+check "the socket programs load with these capabilities" "! grep -q 'not counting traffic per process' /run/err.log"
 
 send '{"cmd":"limit","app":"org.example.Fetcher","down":2000000,"up":null}'
 sleep 1

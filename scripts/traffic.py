@@ -3,11 +3,18 @@
 client that measures how fast that goes.
 
     traffic.py serve PORT
-    traffic.py down HOST PORT BYTES     # prints {"bytes": .., "seconds": .., "rate": ..}
+    traffic.py down HOST PORT BYTES     # prints {"pid": .., "bytes": .., "seconds": .., "rate": ..}
     traffic.py up HOST PORT BYTES
+    traffic.py fork-down HOST PORT BYTES
+
+fork-down connects, then a forked child downloads on the parent's socket; it
+prints the parent's pid and the child's as "child". TRAFFIC_DELAY=SECONDS
+waits that long between connecting and transferring, and TRAFFIC_READY=PATH
+creates that file once connected.
 """
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -58,6 +65,19 @@ def client(mode, host, port, size):
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     conn = socket.socket(family, socket.SOCK_STREAM)
     conn.connect((host, port))
+    if "TRAFFIC_READY" in os.environ:
+        open(os.environ["TRAFFIC_READY"], "w").close()
+    time.sleep(float(os.environ.get("TRAFFIC_DELAY", "0")))
+    parent = os.getpid()
+    child = None
+    if mode == "fork-down":
+        mode = "down"
+        child = os.fork()
+        if child:
+            conn.close()  # the child holds the socket now
+            os.waitpid(child, 0)
+            print(json.dumps({"pid": parent, "child": child}))
+            return
     start = time.monotonic()
     conn.sendall(f"{mode} {size}\n".encode())
     left = size
@@ -73,7 +93,9 @@ def client(mode, host, port, size):
             left -= conn.send(block[: min(CHUNK, left)])
         conn.recv(16)
     seconds = time.monotonic() - start
-    print(json.dumps({"bytes": size - max(left, 0), "seconds": round(seconds, 3),
+    if child == 0:
+        os._exit(0)
+    print(json.dumps({"pid": parent, "bytes": size - max(left, 0), "seconds": round(seconds, 3),
                       "rate": round((size - max(left, 0)) / seconds)}))
 
 

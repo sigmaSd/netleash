@@ -1,7 +1,7 @@
 //! netleash: measures and limits network traffic per app with eBPF.
 //!
-//! Runs as root or with CAP_BPF, CAP_NET_ADMIN and CAP_PERFMON, attaches the two
-//! cgroup_skb programs in `ebpf/` to the root cgroup, and
+//! Runs as root or with CAP_BPF, CAP_NET_ADMIN and CAP_PERFMON, attaches the
+//! cgroup_skb and cgroup_sock programs in `ebpf/` to the root cgroup, and
 //! talks JSON lines on stdin/stdout (see `protocol`). The programs detach
 //! when the helper exits, however it exits: they are held by bpf_link file
 //! descriptors, not left behind in the kernel like tc rules.
@@ -10,6 +10,7 @@ mod apps;
 mod capabilities;
 mod dns;
 mod limits;
+mod processes;
 mod protocol;
 mod qdisc;
 
@@ -18,10 +19,12 @@ use apps::{CGROUP_ROOT, Cgroup, Kind};
 use aya::{
     Ebpf,
     maps::{Array, HashMap as BpfHashMap, MapData, PerCpuHashMap},
-    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
+    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, CgroupSock},
 };
 use limits::{Direction, GLOBAL_DOWN, GLOBAL_UP, MAX_RATE, Slots};
-use netleash_common::{AppCounters, Bucket, BucketKey, Config, FlowCounters, FlowKey};
+use netleash_common::{
+    AppCounters, Bucket, BucketKey, Comm, Config, FlowCounters, FlowKey, ProcessKey,
+};
 use protocol::{Command, Connection, Event, Rates, Sample};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -43,6 +46,9 @@ struct Maps {
     flows: BpfHashMap<MapData, FlowKey, FlowCounters>,
     cgroup_buckets: BpfHashMap<MapData, BucketKey, u32>,
     buckets: Array<MapData, Bucket>,
+    // LRU maps, read through the plain kinds too.
+    process_stats: PerCpuHashMap<MapData, ProcessKey, AppCounters>,
+    process_names: BpfHashMap<MapData, u32, Comm>,
 }
 
 /// Load the programs, attach them to the root cgroup and take the maps.
@@ -67,6 +73,11 @@ fn load() -> Result<(Ebpf, Maps)> {
             .attach(&root, attach, CgroupAttachMode::Single)
             .with_context(|| format!("attaching {name}"))?;
     }
+    // Per-process counts are extra: without them, traffic still counts per
+    // app. (Linux before 5.9 has no release hook, for one.)
+    if let Err(error) = attach_socket_programs(&mut bpf, &root) {
+        eprintln!("netleash: not counting traffic per process: {error:#}");
+    }
     let mut take = |name: &str| {
         bpf.take_map(name)
             .with_context(|| format!("missing map {name}"))
@@ -77,8 +88,27 @@ fn load() -> Result<(Ebpf, Maps)> {
         flows: BpfHashMap::try_from(take("flows")?)?,
         cgroup_buckets: BpfHashMap::try_from(take("cgroup_buckets")?)?,
         buckets: Array::try_from(take("buckets")?)?,
+        process_stats: PerCpuHashMap::try_from(take("process_stats")?)?,
+        process_names: BpfHashMap::try_from(take("process_names")?)?,
     };
     Ok((bpf, maps))
+}
+
+/// Attach the programs that record which process creates each socket.
+fn attach_socket_programs(bpf: &mut Ebpf, root: &fs::File) -> Result<()> {
+    for name in ["netleash_sock_create", "netleash_sock_release"] {
+        let program: &mut CgroupSock = bpf
+            .program_mut(name)
+            .with_context(|| format!("missing program {name}"))?
+            .try_into()?;
+        program
+            .load()
+            .with_context(|| format!("verifying {name}"))?;
+        program
+            .attach(root, CgroupAttachMode::Single)
+            .with_context(|| format!("attaching {name}"))?;
+    }
+    Ok(())
 }
 
 fn emit(event: &Event) {
@@ -180,6 +210,8 @@ struct Helper {
     ids: HashMap<u64, String>,
     last_scan: Instant,
     app_totals: HashMap<u64, (u64, u64)>,
+    process_totals: HashMap<ProcessKey, (u64, u64)>,
+    last_prune: Instant,
     flow_totals: HashMap<FlowKey, (u64, u64)>,
     iface_totals: (u64, u64),
     last_tick: Instant,
@@ -204,6 +236,8 @@ impl Helper {
             ids: HashMap::new(),
             last_scan: Instant::now(),
             app_totals: HashMap::new(),
+            process_totals: HashMap::new(),
+            last_prune: Instant::now(),
             flow_totals: HashMap::new(),
             iface_totals: interface_totals(None),
             last_tick: Instant::now(),
@@ -362,6 +396,33 @@ impl Helper {
         }
     }
 
+    /// A process's name: its own while it runs, else the name of the thread
+    /// that created its latest socket.
+    fn process_name(&self, pid: u32) -> String {
+        if let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) {
+            return comm.trim_end_matches('\n').to_string();
+        }
+        self.maps
+            .process_names
+            .get(&pid, 0)
+            .map(|comm| processes::comm_name(&comm))
+            .unwrap_or_default()
+    }
+
+    /// Forget processes that have exited and whose sockets went quiet, so
+    /// the maps don't fill up. Their last bytes were reported a sample ago.
+    fn prune_processes(&mut self, now: &mut HashMap<ProcessKey, (u64, u64)>) {
+        self.last_prune = Instant::now();
+        for key in processes::idle(now, &self.process_totals) {
+            if Path::new(&format!("/proc/{}", key.pid)).exists() {
+                continue;
+            }
+            let _ = self.maps.process_stats.remove(&key);
+            let _ = self.maps.process_names.remove(&key.pid);
+            now.remove(&key);
+        }
+    }
+
     fn sample(&mut self) -> Sample {
         let elapsed = self.last_tick.elapsed().as_secs_f64().max(0.001);
         self.last_tick = Instant::now();
@@ -372,19 +433,29 @@ impl Helper {
         let header = self.header_len;
         let mut current: HashMap<u64, (u64, u64)> = HashMap::new();
         for (cgroup, values) in self.maps.app_stats.iter().flatten() {
-            let sum = values.iter().fold((0, 0), |(rx, tx), v| {
-                (
-                    rx + v.rx_bytes + v.rx_packets * header,
-                    tx + v.tx_bytes + v.tx_packets * header,
-                )
-            });
-            current.insert(cgroup, sum);
+            current.insert(cgroup, processes::sum(&values, header));
         }
+        // Read right after the apps', so the two agree on a busy link.
+        let totals = interface_totals(self.interface.as_deref());
+        let total = Rates {
+            rx: per_second(totals.0.saturating_sub(self.iface_totals.0), elapsed),
+            tx: per_second(totals.1.saturating_sub(self.iface_totals.1), elapsed),
+        };
+        self.iface_totals = totals;
         if current.keys().any(|id| !self.ids.contains_key(id))
             || self.last_scan.elapsed() > Duration::from_secs(10)
         {
             self.rescan();
         }
+
+        let mut process_now: HashMap<ProcessKey, (u64, u64)> = self
+            .maps
+            .process_stats
+            .iter()
+            .flatten()
+            .map(|(key, values)| (key, processes::sum(&values, header)))
+            .collect();
+        let mut process_rates = processes::rates(&process_now, &self.process_totals, elapsed);
 
         let mut apps: BTreeMap<String, protocol::App> = BTreeMap::new();
         for (cgroup, (rx, tx)) in &current {
@@ -409,6 +480,7 @@ impl Helper {
                 kind: info.unit.kind.clone(),
                 units: Vec::new(),
                 processes: Vec::new(),
+                process_traffic: Vec::new(),
                 rates: Rates::default(),
                 limit_down: self.limits.get(&(id.clone(), Direction::Down)).copied(),
                 limit_up: self.limits.get(&(id.clone(), Direction::Up)).copied(),
@@ -421,8 +493,22 @@ impl Helper {
                     app.processes.push(process);
                 }
             }
+            for (pid, rates) in process_rates.remove(cgroup).unwrap_or_default() {
+                processes::merge(&mut app.process_traffic, pid, rates);
+            }
         }
         self.app_totals = current;
+        for app in apps.values_mut() {
+            for process in &mut app.process_traffic {
+                process.name = self.process_name(process.pid);
+            }
+            app.process_traffic
+                .sort_by_key(|p| (std::cmp::Reverse(p.rates.rx + p.rates.tx), p.pid));
+        }
+        if self.last_prune.elapsed() > Duration::from_secs(10) {
+            self.prune_processes(&mut process_now);
+        }
+        self.process_totals = process_now;
 
         // Per-connection counters.
         let mut connections = Vec::new();
@@ -452,13 +538,6 @@ impl Helper {
             });
         }
         self.flow_totals = flow_now;
-
-        let totals = interface_totals(self.interface.as_deref());
-        let total = Rates {
-            rx: per_second(totals.0.saturating_sub(self.iface_totals.0), elapsed),
-            tx: per_second(totals.1.saturating_sub(self.iface_totals.1), elapsed),
-        };
-        self.iface_totals = totals;
 
         let mut apps: Vec<protocol::App> = apps.into_values().collect();
         apps.sort_by_key(|a| std::cmp::Reverse(a.rates.rx + a.rates.tx));
@@ -586,7 +665,19 @@ mod tests {
         for program in ["netleash_ingress", "netleash_egress"] {
             assert!(object.programs.contains_key(program), "{program}");
         }
-        for map in ["config", "app_stats", "flows", "cgroup_buckets", "buckets"] {
+        for program in ["netleash_sock_create", "netleash_sock_release"] {
+            assert!(object.programs.contains_key(program), "{program}");
+        }
+        for map in [
+            "config",
+            "app_stats",
+            "flows",
+            "cgroup_buckets",
+            "buckets",
+            "socket_owners",
+            "process_names",
+            "process_stats",
+        ] {
             assert!(object.maps.contains_key(map), "{map}");
         }
     }

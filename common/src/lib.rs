@@ -39,6 +39,19 @@ pub struct AppCounters {
     pub tx_packets: u64,
 }
 
+/// One process's traffic in one cgroup: the process that created the socket.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub struct ProcessKey {
+    pub cgroup: u64,
+    /// Thread group id (the PID `ps` shows), in the initial PID namespace.
+    pub pid: u32,
+    pub pad: u32,
+}
+
+/// A process name as the kernel keeps it: up to 15 bytes, NUL-padded.
+pub type Comm = [u8; 16];
+
 /// One remote endpoint of one cgroup.
 #[repr(C)]
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -92,6 +105,7 @@ mod user {
     unsafe impl aya::Pod for Config {}
     unsafe impl aya::Pod for AppCounters {}
     unsafe impl aya::Pod for FlowKey {}
+    unsafe impl aya::Pod for ProcessKey {}
     unsafe impl aya::Pod for FlowCounters {}
     unsafe impl aya::Pod for BucketKey {}
     unsafe impl aya::Pod for Bucket {}

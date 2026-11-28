@@ -11,6 +11,8 @@ is a GTK one.
 - Apps are named by their application ID (`org.mozilla.firefox`), from the
   systemd scope desktops start them in, so front ends can show the right name
   and icon.
+- Each app's traffic is also split by process, so a `wget` started from a
+  terminal shows up as `wget`, not just as the terminal.
 - Upload limits are paced, not dropped: TCP doesn't retransmit.
 - It installs nothing and leaves nothing behind: everything detaches when
   netleash exits, however it exits.
@@ -70,14 +72,20 @@ Closing stdin stops it and removes every limit.
 ## How it works
 
 Two `cgroup_skb` eBPF programs, written in Rust with
-[aya-ebpf](https://crates.io/crates/aya-ebpf) (`ebpf/`), are attached to the
-root cgroup. Every packet a local socket sends or receives passes through them with
+[aya-ebpf](https://crates.io/crates/aya-ebpf) (`ebpf/`), and two `cgroup_sock`
+ones are attached to the root cgroup. Every packet a local socket sends or receives passes through them with
 the socket's cgroup id. Desktops run each app in its own systemd scope
 (`app-gnome-org.mozilla.firefox-9848.scope`) and each service in its own unit,
 so the cgroup names the app.
 
 - **Counting:** bytes per cgroup and per connection (remote address and ports),
   IPv4 and IPv6, on the chosen interface only.
+- **Processes:** when a process creates an IPv4 or IPv6 socket, a
+  `cgroup_sock` program runs in that process and records it as the socket's
+  owner, by socket cookie; another forgets the socket when it is closed. The
+  `cgroup_skb` programs then also count each packet for its socket's owner.
+  This needs Linux 5.9 or later; on older kernels netleash counts per app
+  only.
 - **Limiting:** a limit per app and direction, plus a global one.
   - Uploads are paced: each packet gets a departure time (EDT), and the `fq`
     queueing discipline, which netleash puts on the interface while an
@@ -163,6 +171,7 @@ Events, one per line on stdout:
  "apps": [{"id": "org.mozilla.firefox", "kind": "app",
            "units": ["app-gnome-org.mozilla.firefox-9848.scope"],
            "processes": ["firefox", "Socket Process"],
+           "processTraffic": [{"pid": 4242, "name": "firefox", "rx": 2500000, "tx": 200000}],
            "rx": 2500000, "tx": 200000, "limitDown": 2500000}],
  "connections": [{"app": "org.mozilla.firefox", "protocol": "tcp",
                   "remote": "2606:4700::6810:84e5", "host": "example.com",
@@ -173,6 +182,14 @@ Events, one per line on stdout:
 
 - A sample is sent once a second.
 - `kind` is `app`, `service` or `other`.
+- `processes` names the processes running in the app's units.
+- `processTraffic` splits the app's `rx` and `tx` by the process that created
+  each socket, busiest first, leaving out idle ones. `pid` is in the initial
+  PID namespace, and `name` is the process's name, or once it has exited, the
+  name of the thread that created its last socket. It doesn't always add up
+  to the app's totals; see [Limitations](#limitations). Versions up to 0.2.1
+  don't send it.
+- Fields may be added in later versions; ignore the ones you don't know.
 
 ## Testing as root without sudo
 
@@ -182,7 +199,9 @@ Events, one per line on stdout:
 
 - builds a veth pair to a server in its own network namespace;
 - runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
-- checks attribution, per-app and global limits in both directions, upload
+- checks attribution to apps and to processes (two processes in one scope, a
+  forked child on its parent's socket, a socket opened before netleash
+  started), per-app and global limits in both directions, upload
   pacing through `fq` without retransmissions, limits without `fq`, error
   reporting, and that nothing stays attached after netleash exits.
 
@@ -224,5 +243,13 @@ instead of `ebpf/`, and publishes `netleash-common` and `netleash`.
 ## Limitations
 
 - Programs started from a terminal share the terminal's scope, so their traffic
-  is reported under the terminal app.
+  is reported under the terminal app; `processTraffic` tells them apart.
+- `processTraffic` credits a socket to the process that created it, even when
+  a forked child or another process it was passed to uses it. It leaves out
+  sockets whose creation netleash didn't see, so their traffic is in the
+  app's totals only:
+  - sockets created before netleash started;
+  - connections accepted by a listening socket, which the kernel creates
+    itself;
+  - what TCP still sends after the process closed the socket.
 - IPv6 extension headers are not followed when reading ports.

@@ -57,6 +57,12 @@ pub struct App {
     pub units: Vec<String>,
     /// Process names in those units, most frequent first.
     pub processes: Vec<String>,
+    /// The app's traffic by the process that created each socket, busiest
+    /// first. Traffic of sockets whose creator netleash didn't see (opened
+    /// before it started, or accepted from a listening socket) is in the
+    /// app's totals only.
+    #[serde(rename = "processTraffic")]
+    pub process_traffic: Vec<ProcessTraffic>,
     #[serde(flatten)]
     pub rates: Rates,
     /// Limits currently applied, in bytes per second.
@@ -64,6 +70,16 @@ pub struct App {
     pub limit_down: Option<u64>,
     #[serde(rename = "limitUp", skip_serializing_if = "Option::is_none")]
     pub limit_up: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProcessTraffic {
+    pub pid: u32,
+    /// The process's name (`/proc/<pid>/comm`), or once it has exited, the
+    /// name of the thread that created its last socket.
+    pub name: String,
+    #[serde(flatten)]
+    pub rates: Rates,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +144,11 @@ mod tests {
             kind: Kind::App,
             units: vec!["app-gnome-org.mozilla.firefox-1.scope".into()],
             processes: vec!["firefox".into()],
+            process_traffic: vec![ProcessTraffic {
+                pid: 4242,
+                name: "firefox".into(),
+                rates: Rates { rx: 9, tx: 2 },
+            }],
             rates: Rates { rx: 10, tx: 2 },
             limit_down: Some(100),
             limit_up: None,
@@ -141,7 +162,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sample","interface":"wlan0","total":{"rx":12,"tx":3},"apps":[{"id":"org.mozilla.firefox","kind":"app","units":["app-gnome-org.mozilla.firefox-1.scope"],"processes":["firefox"],"rx":10,"tx":2,"limitDown":100}],"connections":[]}"#
+            r#"{"type":"sample","interface":"wlan0","total":{"rx":12,"tx":3},"apps":[{"id":"org.mozilla.firefox","kind":"app","units":["app-gnome-org.mozilla.firefox-1.scope"],"processes":["firefox"],"processTraffic":[{"pid":4242,"name":"firefox","rx":9,"tx":2}],"rx":10,"tx":2,"limitDown":100}],"connections":[]}"#
         );
     }
 }

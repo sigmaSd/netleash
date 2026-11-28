@@ -15,6 +15,13 @@ mkdir -p "$OUT"
 rm -f "$OUT"/*
 . scripts/vm-net.sh
 
+# A socket opened before netleash starts: its traffic counts for the app, but
+# netleash never saw which process created it.
+in_cgroup "$APP_B" env TRAFFIC_DELAY=3 TRAFFIC_READY="$OUT/early.ready" \
+  python3 scripts/traffic.py down 10.9.0.2 9000 50000000 > "$OUT/early.json" &
+EARLY=$!
+until [ -e "$OUT/early.ready" ]; do sleep 0.1; done
+
 # The helper, fed commands through a fifo.
 mkfifo "$OUT/commands"
 "$HELPER" < "$OUT/commands" > "$OUT/events.jsonl" 2> "$OUT/stderr.log" &
@@ -60,6 +67,69 @@ RX=$(attributed rx)
 TX=$(attributed tx)
 echo "apps' share of busy samples: download $RX/1000, upload $TX/1000"
 check "apps add up to the interface's counters" "[ $RX -ge 990 ] && [ $RX -le 1010 ] && [ $TX -ge 990 ] && [ $TX -le 1010 ]"
+
+# Per process: two processes in one app scope, one downloading over IPv4 and
+# one uploading over IPv6, and a child downloading on its parent's socket.
+wait "$EARLY"
+in_cgroup "$APP_A" python3 scripts/traffic.py down 10.9.0.2 9000 100000000 > "$OUT/down.json" &
+DOWN=$!
+in_cgroup "$APP_A" python3 scripts/traffic.py up fd00::2 9000 100000000 > "$OUT/up.json" &
+UP=$!
+wait "$DOWN" "$UP"
+in_cgroup "$APP_A" python3 scripts/traffic.py fork-down 10.9.0.2 9000 50000000 > "$OUT/fork.json"
+sleep 2
+per_process() { # check
+  python3 - "$OUT" "$1" <<'PY'
+import json, sys
+out, check = sys.argv[1], sys.argv[2]
+load = lambda name: json.load(open(f"{out}/{name}.json"))
+early, down, up, fork = load("early"), load("down"), load("up"), load("fork")
+# Bytes per app and per (app, pid), from each sample's rates over a second.
+apps, procs, names = {}, {}, {}
+for line in open(f"{out}/events.jsonl"):
+    event = json.loads(line)
+    if event.get("type") != "sample":
+        continue
+    for app in event["apps"]:
+        rx, tx = apps.get(app["id"], (0, 0))
+        apps[app["id"]] = (rx + app["rx"], tx + app["tx"])
+        for p in app["processTraffic"]:
+            key = (app["id"], p["pid"])
+            rx, tx = procs.get(key, (0, 0))
+            procs[key] = (rx + p["rx"], tx + p["tx"])
+            names[key] = p["name"]
+fetcher = lambda pid: procs.get(("org.example.Fetcher", pid), (0, 0))
+near = lambda got, want: want * 0.9 <= got <= want * 1.15
+if check == "report":
+    for key, (rx, tx) in sorted(procs.items()):
+        print(f"  {key[0]} pid {key[1]} ({names[key]}): rx {rx}, tx {tx}")
+    print(f"  downloader {down['pid']}, uploader {up['pid']}, fork parent {fork['pid']} child {fork['child']}, early {early['pid']}")
+elif check == "split":
+    rx, tx = fetcher(down["pid"])
+    urx, utx = fetcher(up["pid"])
+    ok = near(rx, down["bytes"]) and tx < rx / 10 and near(utx, up["bytes"]) and urx < utx / 10
+    ok = ok and names[("org.example.Fetcher", down["pid"])] == "python3"
+    sys.exit(0 if ok else 1)
+elif check == "fork":
+    rx, _ = fetcher(fork["pid"])
+    sys.exit(0 if near(rx, 50_000_000) and fork["child"] not in [k[1] for k in procs] else 1)
+elif check == "sum":
+    prx = sum(rx for (app, _), (rx, _) in procs.items() if app == "org.example.Fetcher")
+    ptx = sum(tx for (app, _), (_, tx) in procs.items() if app == "org.example.Fetcher")
+    rx, tx = apps["org.example.Fetcher"]
+    print(f"  Fetcher: processes {prx}/{rx} rx, {ptx}/{tx} tx")
+    sys.exit(0 if rx * 0.99 <= prx <= rx * 1.001 and tx * 0.99 <= ptx <= tx * 1.001 else 1)
+elif check == "early":
+    rx, _ = apps.get("org.example.Uploader", (0, 0))
+    seen = ("org.example.Uploader", early["pid"]) in procs
+    sys.exit(0 if not seen and rx >= early["bytes"] else 1)
+PY
+}
+per_process report
+check "two processes in one scope are told apart" "per_process split"
+check "a forked child's traffic is credited to the socket's creator" "per_process fork"
+check "per-process traffic adds up to the app's" "per_process sum"
+check "a socket from before netleash counts for the app only" "per_process early"
 
 # Per-app download limit, IPv4.
 send '{"cmd":"limit","app":"org.example.Fetcher","down":2000000,"up":null}'

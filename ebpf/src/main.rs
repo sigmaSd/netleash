@@ -5,6 +5,11 @@
 //!
 //! - `app_stats` counts bytes per cgroup.
 //! - `flows` counts bytes per cgroup and remote address, IPv4 and IPv6.
+//! - `process_stats` counts bytes per cgroup and process. Two `cgroup_sock`
+//!   programs, which run in the calling process when an IPv4 or IPv6 socket
+//!   is created or closed, keep `socket_owners` (socket cookie to PID) and
+//!   `process_names` up to date; packets of sockets without an owner, such
+//!   as ones created before netleash started, count for their cgroup only.
 //! - `cgroup_buckets` assigns a cgroup a token bucket per direction; packets
 //!   over the bucket's rate are dropped. Buckets [`GLOBAL_DOWN`] and
 //!   [`GLOBAL_UP`] limit every app together.
@@ -21,18 +26,21 @@
 use aya_ebpf::{
     EbpfContext,
     bindings::{__sk_buff, BPF_NOEXIST},
-    helpers::{bpf_ktime_get_ns, generated::bpf_skb_cgroup_id},
-    macros::{cgroup_skb, map},
-    maps::{Array, HashMap, LruHashMap, PerCpuHashMap},
-    programs::SkBuffContext,
+    helpers::{
+        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns,
+        generated::{bpf_get_socket_cookie, bpf_skb_cgroup_id},
+    },
+    macros::{cgroup_skb, cgroup_sock, map},
+    maps::{Array, HashMap, LruHashMap, LruPerCpuHashMap, PerCpuHashMap},
+    programs::{SkBuffContext, SockContext},
 };
 use core::{
     intrinsics::{AtomicOrdering::SeqCst, atomic_cxchg, atomic_xadd},
     ptr::addr_of_mut,
 };
 use netleash_common::{
-    AF_INET, AF_INET6, AppCounters, Bucket, BucketKey, Config, DIR_DOWN, DIR_UP, FlowCounters,
-    FlowKey, GLOBAL_DOWN, GLOBAL_UP, LOOPBACK_IFINDEX, MAX_BUCKETS,
+    AF_INET, AF_INET6, AppCounters, Bucket, BucketKey, Comm, Config, DIR_DOWN, DIR_UP,
+    FlowCounters, FlowKey, GLOBAL_DOWN, GLOBAL_UP, LOOPBACK_IFINDEX, MAX_BUCKETS, ProcessKey,
 };
 
 /// Atomically add to a value in a map and return what it held before.
@@ -72,6 +80,8 @@ const NS_PER_SEC: u64 = 1_000_000_000;
 /// cgroup_skb return values.
 const DROP: i32 = 0;
 const PASS: i32 = 1;
+/// cgroup_sock return value that lets the socket be created.
+const ALLOW: i32 = 1;
 
 #[map(name = "config")]
 static CONFIG: Array<Config> = Array::with_max_entries(1, 0);
@@ -81,6 +91,20 @@ static APP_STATS: PerCpuHashMap<u64, AppCounters> = PerCpuHashMap::with_max_entr
 
 #[map(name = "flows")]
 static FLOWS: LruHashMap<FlowKey, FlowCounters> = LruHashMap::with_max_entries(65536, 0);
+
+/// The process that created each open socket, by socket cookie. LRU so
+/// that, should a release ever be missed, old entries make room.
+#[map(name = "socket_owners")]
+static SOCKET_OWNERS: LruHashMap<u64, u32> = LruHashMap::with_max_entries(65536, 0);
+
+/// The thread name that created a process's latest socket, for naming
+/// processes that exit before userspace sees them.
+#[map(name = "process_names")]
+static PROCESS_NAMES: LruHashMap<u32, Comm> = LruHashMap::with_max_entries(16384, 0);
+
+#[map(name = "process_stats")]
+static PROCESS_STATS: LruPerCpuHashMap<ProcessKey, AppCounters> =
+    LruPerCpuHashMap::with_max_entries(16384, 0);
 
 #[map(name = "cgroup_buckets")]
 static CGROUP_BUCKETS: HashMap<BucketKey, u32> = HashMap::with_max_entries(16384, 0);
@@ -96,6 +120,46 @@ pub fn netleash_ingress(ctx: SkBuffContext) -> i32 {
 #[cgroup_skb(egress)]
 pub fn netleash_egress(ctx: SkBuffContext) -> i32 {
     handle(&ctx, DIR_UP)
+}
+
+/// Runs in the process creating an IPv4 or IPv6 socket: remember it as the
+/// socket's owner. A socket inherited across `fork` or passed to another
+/// process stays credited to the process that created it.
+#[cgroup_sock(sock_create)]
+pub fn netleash_sock_create(ctx: SockContext) -> i32 {
+    // SAFETY: a helper call on the program's own context.
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let _ = SOCKET_OWNERS.insert(&cookie, &pid, 0);
+    if let Ok(comm) = bpf_get_current_comm() {
+        let _ = PROCESS_NAMES.insert(&pid, &comm, 0);
+    }
+    ALLOW
+}
+
+/// Runs when a socket is closed. Data TCP still sends after that counts for
+/// the cgroup only.
+#[cgroup_sock(sock_release)]
+pub fn netleash_sock_release(ctx: SockContext) -> i32 {
+    // SAFETY: as above.
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    let _ = SOCKET_OWNERS.remove(&cookie);
+    ALLOW
+}
+
+/// Add a packet to per-CPU counters.
+#[inline(always)]
+fn add(counters: *mut AppCounters, direction: u32, bytes: u64, frames: u64) {
+    // SAFETY: a per-CPU map value: no other CPU writes this copy.
+    unsafe {
+        if direction == DIR_UP {
+            (*counters).tx_bytes += bytes;
+            (*counters).tx_packets += frames;
+        } else {
+            (*counters).rx_bytes += bytes;
+            (*counters).rx_packets += frames;
+        }
+    }
 }
 
 /// Take `len` tokens from a bucket, refilling it for the time passed.
@@ -331,15 +395,27 @@ fn handle(ctx: &SkBuffContext, direction: u32) -> i32 {
         }
     };
     if let Some(counters) = counters {
-        // SAFETY: per-CPU value: no other CPU writes this copy.
-        unsafe {
-            if direction == DIR_UP {
-                (*counters).tx_bytes += bytes;
-                (*counters).tx_packets += frames;
-            } else {
-                (*counters).rx_bytes += bytes;
-                (*counters).rx_packets += frames;
+        add(counters, direction, bytes, frames);
+    }
+
+    // SAFETY: a helper call on the program's own context.
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr()) };
+    // SAFETY: the value is copied out immediately.
+    if let Some(pid) = unsafe { SOCKET_OWNERS.get(&cookie) }.copied() {
+        let key = ProcessKey {
+            cgroup,
+            pid,
+            pad: 0,
+        };
+        let counters = match PROCESS_STATS.get_ptr_mut(&key) {
+            Some(counters) => Some(counters),
+            None => {
+                let _ = PROCESS_STATS.insert(&key, &AppCounters::default(), BPF_NOEXIST.into());
+                PROCESS_STATS.get_ptr_mut(&key)
             }
+        };
+        if let Some(counters) = counters {
+            add(counters, direction, bytes, frames);
         }
     }
 
