@@ -211,7 +211,6 @@ struct Helper {
     last_scan: Instant,
     app_totals: HashMap<u64, (u64, u64)>,
     process_totals: HashMap<ProcessKey, (u64, u64)>,
-    last_prune: Instant,
     flow_totals: HashMap<FlowKey, (u64, u64)>,
     iface_totals: (u64, u64),
     last_tick: Instant,
@@ -237,7 +236,6 @@ impl Helper {
             last_scan: Instant::now(),
             app_totals: HashMap::new(),
             process_totals: HashMap::new(),
-            last_prune: Instant::now(),
             flow_totals: HashMap::new(),
             iface_totals: interface_totals(None),
             last_tick: Instant::now(),
@@ -410,17 +408,27 @@ impl Helper {
     }
 
     /// Forget processes that have exited and whose sockets went quiet, so
-    /// the maps don't fill up. Their last bytes were reported a sample ago.
-    fn prune_processes(&mut self, now: &mut HashMap<ProcessKey, (u64, u64)>) {
-        self.last_prune = Instant::now();
-        for key in processes::idle(now, &self.process_totals) {
-            if Path::new(&format!("/proc/{}", key.pid)).exists() {
-                continue;
+    /// the maps don't fill up; their last bytes were reported a sample ago.
+    /// Returns their PIDs.
+    fn prune_processes(&mut self, now: &mut HashMap<ProcessKey, (u64, u64)>) -> Vec<u32> {
+        let idle = processes::idle(now, &self.process_totals);
+        let exited = processes::exited(&idle, |pid| !Path::new(&format!("/proc/{pid}")).exists());
+        for key in &idle {
+            if exited.contains(&key.pid) {
+                let _ = self.maps.process_stats.remove(key);
+                now.remove(key);
             }
-            let _ = self.maps.process_stats.remove(&key);
-            let _ = self.maps.process_names.remove(&key.pid);
-            now.remove(&key);
         }
+        // A process can still be sending from a socket in another cgroup.
+        let mut gone: Vec<u32> = exited
+            .into_iter()
+            .filter(|pid| !now.keys().any(|key| key.pid == *pid))
+            .collect();
+        gone.sort_unstable();
+        for pid in &gone {
+            let _ = self.maps.process_names.remove(pid);
+        }
+        gone
     }
 
     fn sample(&mut self) -> Sample {
@@ -505,9 +513,7 @@ impl Helper {
             app.process_traffic
                 .sort_by_key(|p| (std::cmp::Reverse(p.rates.rx + p.rates.tx), p.pid));
         }
-        if self.last_prune.elapsed() > Duration::from_secs(10) {
-            self.prune_processes(&mut process_now);
-        }
+        let exited_processes = self.prune_processes(&mut process_now);
         self.process_totals = process_now;
 
         // Per-connection counters.
@@ -547,6 +553,7 @@ impl Helper {
             total,
             apps,
             connections,
+            exited_processes,
         }
     }
 }

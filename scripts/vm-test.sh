@@ -77,7 +77,7 @@ in_cgroup "$APP_A" python3 scripts/traffic.py up fd00::2 9000 100000000 > "$OUT/
 UP=$!
 wait "$DOWN" "$UP"
 in_cgroup "$APP_A" python3 scripts/traffic.py fork-down 10.9.0.2 9000 50000000 > "$OUT/fork.json"
-sleep 2
+sleep 3
 per_process() { # check
   python3 - "$OUT" "$1" <<'PY'
 import json, sys
@@ -86,10 +86,13 @@ load = lambda name: json.load(open(f"{out}/{name}.json"))
 early, down, up, fork = load("early"), load("down"), load("up"), load("fork")
 # Bytes per app and per (app, pid), from each sample's rates over a second.
 apps, procs, names = {}, {}, {}
-for line in open(f"{out}/events.jsonl"):
+# Sample index of each PID's last traffic, and of each exit report.
+last, exits = {}, []
+for i, line in enumerate(open(f"{out}/events.jsonl")):
     event = json.loads(line)
     if event.get("type") != "sample":
         continue
+    exits += [(pid, i) for pid in event["exitedProcesses"]]
     for app in event["apps"]:
         rx, tx = apps.get(app["id"], (0, 0))
         apps[app["id"]] = (rx + app["rx"], tx + app["tx"])
@@ -98,6 +101,7 @@ for line in open(f"{out}/events.jsonl"):
             rx, tx = procs.get(key, (0, 0))
             procs[key] = (rx + p["rx"], tx + p["tx"])
             names[key] = p["name"]
+            last[p["pid"]] = i
 fetcher = lambda pid: procs.get(("org.example.Fetcher", pid), (0, 0))
 near = lambda got, want: want * 0.9 <= got <= want * 1.15
 if check == "report":
@@ -123,6 +127,12 @@ elif check == "early":
     rx, _ = apps.get("org.example.Uploader", (0, 0))
     seen = ("org.example.Uploader", early["pid"]) in procs
     sys.exit(0 if not seen and rx >= early["bytes"] else 1)
+elif check == "exited":
+    pids = [down["pid"], up["pid"], fork["pid"]]
+    reported = [pid for pid, _ in exits]
+    ok = all(reported.count(pid) == 1 for pid in pids)
+    ok = ok and all(i > last[pid] for pid, i in exits if pid in pids)
+    sys.exit(0 if ok else 1)
 PY
 }
 per_process report
@@ -130,6 +140,7 @@ check "two processes in one scope are told apart" "per_process split"
 check "a forked child's traffic is credited to the socket's creator" "per_process fork"
 check "per-process traffic adds up to the app's" "per_process sum"
 check "a socket from before netleash counts for the app only" "per_process early"
+check "exited processes are reported once, after their traffic" "per_process exited"
 
 # Per-app download limit, IPv4.
 send '{"cmd":"limit","app":"org.example.Fetcher","down":2000000,"up":null}'

@@ -102,6 +102,10 @@ pub struct Sample {
     pub total: Rates,
     pub apps: Vec<App>,
     pub connections: Vec<Connection>,
+    /// Processes reported in `processTraffic` before that have exited since
+    /// the previous sample.
+    #[serde(rename = "exitedProcesses")]
+    pub exited_processes: Vec<u32>,
 }
 
 #[cfg(test)]
@@ -158,11 +162,12 @@ mod tests {
             total: Rates { rx: 12, tx: 3 },
             apps: vec![app],
             connections: vec![],
+            exited_processes: vec![4100],
         }))
         .unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sample","interface":"wlan0","total":{"rx":12,"tx":3},"apps":[{"id":"org.mozilla.firefox","kind":"app","units":["app-gnome-org.mozilla.firefox-1.scope"],"processes":["firefox"],"processTraffic":[{"pid":4242,"name":"firefox","rx":9,"tx":2}],"rx":10,"tx":2,"limitDown":100}],"connections":[]}"#
+            r#"{"type":"sample","interface":"wlan0","total":{"rx":12,"tx":3},"apps":[{"id":"org.mozilla.firefox","kind":"app","units":["app-gnome-org.mozilla.firefox-1.scope"],"processes":["firefox"],"processTraffic":[{"pid":4242,"name":"firefox","rx":9,"tx":2}],"rx":10,"tx":2,"limitDown":100}],"connections":[],"exitedProcesses":[4100]}"#
         );
     }
 }

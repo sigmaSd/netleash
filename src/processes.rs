@@ -3,7 +3,7 @@
 
 use crate::protocol::{ProcessTraffic, Rates};
 use netleash_common::{AppCounters, Comm, ProcessKey};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Received and sent bytes, summed over CPUs, with `header` link-layer bytes
 /// added per frame as the interface counts them.
@@ -70,6 +70,12 @@ pub fn idle(
         .filter(|(key, totals)| previous.get(key) == Some(totals))
         .map(|(key, _)| *key)
         .collect()
+}
+
+/// The PIDs among `idle` whose process is gone, each once.
+pub fn exited(idle: &[ProcessKey], gone: impl Fn(u32) -> bool) -> HashSet<u32> {
+    let pids: HashSet<u32> = idle.iter().map(|key| key.pid).collect();
+    pids.into_iter().filter(|pid| gone(*pid)).collect()
 }
 
 /// A kernel process name, up to its NUL.
@@ -149,6 +155,13 @@ mod tests {
             (key(1, 12), (0, 0)),
         ]);
         assert_eq!(idle(&now, &previous), vec![key(1, 10)]);
+    }
+
+    #[test]
+    fn exited_pids_are_listed_once() {
+        let idle = [key(1, 10), key(2, 10), key(1, 11), key(1, 12)];
+        let exited = exited(&idle, |pid| pid != 11);
+        assert_eq!(exited, HashSet::from([10, 12]));
     }
 
     #[test]

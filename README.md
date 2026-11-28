@@ -175,7 +175,8 @@ Events, one per line on stdout:
            "rx": 2500000, "tx": 200000, "limitDown": 2500000}],
  "connections": [{"app": "org.mozilla.firefox", "protocol": "tcp",
                   "remote": "2606:4700::6810:84e5", "host": "example.com",
-                  "remotePort": 443, "localPort": 51000, "rx": 2500000, "tx": 200000}]}
+                  "remotePort": 443, "localPort": 51000, "rx": 2500000, "tx": 200000}],
+ "exitedProcesses": [4100]}
 {"type": "error", "message": "no network interface named wlan9"}
 {"type": "stopped"}
 ```
@@ -189,6 +190,10 @@ Events, one per line on stdout:
   name of the thread that created its last socket. It doesn't always add up
   to the app's totals; see [Limitations](#limitations). Versions up to 0.2.1
   don't send it.
+- `exitedProcesses` lists the PIDs from earlier `processTraffic` whose
+  processes have exited since the previous sample, once their sockets went
+  quiet. Each PID is listed once. If the kernel reuses a PID before netleash
+  notices, the exit isn't reported. Versions up to 0.2.1 don't send it.
 - Fields may be added in later versions; ignore the ones you don't know.
 
 ## Testing as root without sudo
@@ -201,7 +206,7 @@ Events, one per line on stdout:
 - runs IPv4 and IPv6 traffic from two cgroups named like desktop app scopes;
 - checks attribution to apps and to processes (two processes in one scope, a
   forked child on its parent's socket, a socket opened before netleash
-  started), per-app and global limits in both directions, upload
+  started, exits reported), per-app and global limits in both directions, upload
   pacing through `fq` without retransmissions, limits without `fq`, error
   reporting, and that nothing stays attached after netleash exits.
 
