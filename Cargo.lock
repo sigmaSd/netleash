@@ -245,7 +245,6 @@ dependencies = [
  "aya-obj",
  "caps",
  "dns-lookup",
- "libc",
  "netleash-common",
  "serde",
  "serde_json",

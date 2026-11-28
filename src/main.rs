@@ -6,6 +6,9 @@
 //! when the helper exits, however it exits: they are held by bpf_link file
 //! descriptors, not left behind in the kernel like tc rules.
 
+// The eBPF programs need unsafe; this side doesn't.
+#![forbid(unsafe_code)]
+
 mod apps;
 mod capabilities;
 mod dns;
@@ -14,7 +17,7 @@ mod processes;
 mod protocol;
 mod qdisc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow};
 use apps::{CGROUP_ROOT, Cgroup, Kind};
 use aya::{
     Ebpf,
@@ -153,14 +156,17 @@ fn link_header_len(interface: &str) -> u64 {
     }
 }
 
+/// An interface's index, from sysfs like its link type. Names are at most 15
+/// bytes and can't contain `/`, so a name can't reach outside the interface's
+/// own directory.
 fn ifindex(name: &str) -> Result<u32> {
-    let c_name = std::ffi::CString::new(name)?;
-    // SAFETY: c_name is a valid NUL-terminated string.
-    let index = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-    if index == 0 {
-        bail!("no network interface named {name}");
-    }
-    Ok(index)
+    let valid =
+        !name.is_empty() && name.len() < 16 && !name.contains('/') && !name.starts_with('.');
+    valid
+        .then(|| fs::read_to_string(format!("/sys/class/net/{name}/ifindex")).ok())
+        .flatten()
+        .and_then(|index| index.trim().parse().ok())
+        .ok_or_else(|| anyhow!("no network interface named {name}"))
 }
 
 fn remote_address(key: &FlowKey) -> IpAddr {
@@ -729,6 +735,23 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(remote_address(&key).to_string(), "2606:2800:220:1::1");
+    }
+
+    #[test]
+    fn interface_indexes_come_from_sysfs() {
+        assert_eq!(ifindex("lo").unwrap(), 1);
+        for name in [
+            "",
+            "nope0",
+            "../lo",
+            "lo/..",
+            ".",
+            "..",
+            "a_name_too_long0",
+            "lo\0",
+        ] {
+            assert!(ifindex(name).is_err(), "{name:?}");
+        }
     }
 
     #[test]
